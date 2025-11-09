@@ -121,20 +121,23 @@ type ImageViewControl() as this =
     let mutable glUniformMatrix3fv: GlUniformMatrix3fvDelegate option = None
 
     do
+        let requestRendering observable =
+            observable
+            |> Observable.subscribe (fun _ ->
+                this.RequestNextFrameRendering()
+            ) |> ignore
+
         this.GetPropertyChangedObservable(ImageViewControl.FovProperty)
-        |> Observable.subscribe (fun _ ->
-            this.RequestNextFrameRendering()
-        ) |> ignore
+        |> requestRendering
 
         this.GetPropertyChangedObservable(ImageViewControl.DistanceProperty)
-        |> Observable.subscribe (fun _ ->
-            this.RequestNextFrameRendering()
-        ) |> ignore
+        |> requestRendering
 
         this.GetPropertyChangedObservable(ImageViewControl.DirectionProperty)
-        |> Observable.subscribe (fun _ ->
-            this.RequestNextFrameRendering()
-        ) |> ignore
+        |> requestRendering
+
+        this.GetPropertyChangedObservable(ImageViewControl.PanProperty)
+        |> requestRendering
 
         this.GetPropertyChangedObservable(ImageViewControl.ImageProperty)
         |> Observable.subscribe (fun arg ->
@@ -142,6 +145,8 @@ type ImageViewControl() as this =
             this.RequestNextFrameRendering()
         ) |> ignore
 
+        this.GetPropertyChangedObservable(ImageViewControl.ViewEquirectangularProperty)
+        |> requestRendering
 
     let checkError (gl: OpenGL.GlInterface) =
         let err = gl.GetError()
@@ -214,9 +219,9 @@ type ImageViewControl() as this =
                     bmp
                     |> resizeBitmap
                     |> setTextureImage
-                { resources with Image = Initialized (tex, bmp) }, Some tex
-        | Initialized (tex, _) ->
-            resources, Some tex
+                { resources with Image = Initialized (tex, bmp) }, Some (tex, bmp)
+        | Initialized (tex, bmp) ->
+            resources, Some (tex, bmp)
 
     let setupVertexBuffer (gl: OpenGL.GlInterface) resources =
         match resources.Vertices with
@@ -238,97 +243,72 @@ type ImageViewControl() as this =
             { resources with Vertices = Some vertexArray }, vertexArray
 
     let shaderSource (glVersion:OpenGL.GlVersion) =
+        let vshader = """
+        in vec2 position;
+        out vec2 v_uv;
+        void main() {
+            gl_Position = vec4(position, 0.0, 1.0);
+            v_uv = position;
+        }
+        """
+        let fshader = """
+        in vec2 v_uv;
+        uniform bool u_useEquirectangular;
+        uniform sampler2D u_tex;
+        uniform mat4 u_projectionWorldMatrix;
+        uniform mat4 u_textureMatrix;
+        uniform vec3 u_cameraWorldPos;
+        out vec4 fragColor;
+        const float PI = 3.14159265358979323846;
+        const float SphereRadius = 1.0;
+        const vec3 SpherePos = vec3(0.0, 0.0, 0.0);
+        void main() {
+            if (u_useEquirectangular) {
+                vec4 viewPos = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
+                vec3 viewVec = vec3(viewPos.xy, viewPos.z / viewPos.w) - u_cameraWorldPos;
+                vec3 q = u_cameraWorldPos - SpherePos;
+                float r = SphereRadius;
+                float a = dot(viewVec, viewVec);
+                float b = 2.0 * dot(viewVec, q);
+                float c = dot(q, q) - (r * r);
+                float d = b * b - 4.0 * a * c;
+
+                if (d<0.0) {
+                    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                }
+                else {
+                    float t = (-b + sqrt(d)) / (2.0 * a);
+                    vec3 hitPos = viewVec * t + q;
+                    vec4 hitVec = vec4((hitPos - SpherePos), 0.0) * u_textureMatrix;
+                    vec2 uv0 = vec2(atan(hitVec.x, hitVec.y), asin(hitVec.z));
+                    vec2 uv = vec2((uv0.x + PI) / 2.0, (PI / 2.0) - uv0.y) / PI;
+                    fragColor = texture(u_tex, uv);
+                }
+            }
+            else {
+                vec4 viewPos0 = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
+                vec3 viewVec = vec3(viewPos0.xy, viewPos0.z / viewPos0.w);
+                vec4 uv0 = vec4(viewVec.xy, 0.0, 1.0) * u_textureMatrix;
+                vec2 uv = vec2((uv0.x + 1.0) / 2.0, (1.0 - uv0.y) / 2.0);
+                if (uv.x<0.0 || 1.0<uv.x || uv.y<0.0 || 1.0<uv.y) {
+                    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                }
+                else {
+                    fragColor = texture(u_tex, uv);
+                }
+            }
+        }
+        """
         match glVersion.Type with
         | OpenGL.GlProfileType.OpenGL ->
-            let vshader = """#version 330 core
-            in vec2 position;
-            out vec2 v_uv;
-            void main() {
-                gl_Position = vec4(position, 0.0, 1.0);
-                v_uv = position;
-            }
+            let prefix = """#version 330 core
             """
-            let fshader = """#version 330 core
-            in vec2 v_uv;
-            uniform sampler2D u_tex;
-            uniform mat4 u_projectionWorldMatrix;
-            uniform mat3 u_rotMatrix;
-            uniform vec3 u_cameraWorldPos;
-            out vec4 fragColor;
-            const float PI = 3.14159265358979323846;
-            const float SphereRadius = 1.0;
-            const vec3 SpherePos = vec3(0.0, 0.0, 0.0);
-            void main() {
-
-                vec4 viewPos = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
-                vec3 viewVec = vec3(viewPos.xy, viewPos.z / viewPos.w) - u_cameraWorldPos;
-                vec3 q = u_cameraWorldPos - SpherePos;
-                float r = SphereRadius;
-                float a = dot(viewVec, viewVec);
-                float b = 2.0 * dot(viewVec, q);
-                float c = dot(q, q) - (r * r);
-                float d = b * b - 4.0 * a * c;
-
-                if (d<0.0) {
-                    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                }
-                else {
-                    float t = (-b + sqrt(d)) / (2.0 * a);
-                    vec3 hitPos = viewVec * t + q;
-                    vec3 hitVec = (hitPos - SpherePos) * u_rotMatrix;
-                    vec2 uv0 = vec2(atan(hitVec.x, hitVec.y), asin(hitVec.z));
-                    vec2 uv = vec2((uv0.x + PI) / 2.0, (PI / 2.0) - uv0.y) / PI;
-                    fragColor = texture(u_tex, uv);
-                }
-            }
-            """
-            vshader, fshader
-
+            (prefix + vshader), (prefix + fshader)
         | OpenGL.GlProfileType.OpenGLES ->
-            let vshader = """#version 300 es
-            in vec2 position;
-            out vec2 v_uv;
-            void main() {
-                gl_Position = vec4(position, 0.0, 1.0);
-                v_uv = position;
-            }
-            """
-            let fshader = """#version 300 es
+            let prefix = """#version 300 es
             precision mediump float;
-            in vec2 v_uv;
-            uniform sampler2D u_tex;
-            uniform mat4 u_projectionWorldMatrix;
-            uniform mat3 u_rotMatrix;
-            uniform vec3 u_cameraWorldPos;
-            out vec4 fragColor;
-            const float PI = 3.14159265358979323846;
-            const float SphereRadius = 1.0;
-            const vec3 SpherePos = vec3(0.0, 0.0, 0.0);
-            void main() {
-
-                vec4 viewPos = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
-                vec3 viewVec = vec3(viewPos.xy, viewPos.z / viewPos.w) - u_cameraWorldPos;
-                vec3 q = u_cameraWorldPos - SpherePos;
-                float r = SphereRadius;
-                float a = dot(viewVec, viewVec);
-                float b = 2.0 * dot(viewVec, q);
-                float c = dot(q, q) - (r * r);
-                float d = b * b - 4.0 * a * c;
-
-                if (d<0.0) {
-                    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                }
-                else {
-                    float t = (-b + sqrt(d)) / (2.0 * a);
-                    vec3 hitPos = viewVec * t + q;
-                    vec3 hitVec = (hitPos - SpherePos) * u_rotMatrix;
-                    vec2 uv0 = vec2(atan(hitVec.x, hitVec.y), asin(hitVec.z));
-                    vec2 uv = vec2((uv0.x + PI) / 2.0, (PI / 2.0) - uv0.y) / PI;
-                    fragColor = texture(u_tex, uv);
-                }
-            }
             """
-            vshader, fshader
+            (prefix + vshader), (prefix + fshader)
         | _ -> failwith "Unsupported OpenGL version"
 
     let setupShader (gl: OpenGL.GlInterface) resources =
@@ -363,8 +343,12 @@ type ImageViewControl() as this =
         AvaloniaProperty.Register<ImageViewControl, float>("Distance", 0.0)
     static let directionProperty : StyledProperty<Quaternion> =
         AvaloniaProperty.Register<ImageViewControl, Quaternion>("Direction", Quaternion.Identity)
+    static let panProperty =
+        AvaloniaProperty.Register<ImageViewControl, Vector>("Pan", Vector.Zero)
     static let imageProperty : StyledProperty<Bitmap option> =
         AvaloniaProperty.Register<ImageViewControl, Bitmap option>("Image", None)
+    static let viewEquirectangularProperty =
+        AvaloniaProperty.Register<ImageViewControl, bool>("ViewEquirectangular", false)
 
     interface ICustomHitTest with
         member this.HitTest(point: Point) =
@@ -373,7 +357,9 @@ type ImageViewControl() as this =
     static member FovProperty = fovProperty
     static member DistanceProperty = distanceProperty
     static member DirectionProperty = directionProperty
+    static member PanProperty = panProperty
     static member ImageProperty = imageProperty
+    static member ViewEquirectangularProperty = viewEquirectangularProperty
 
     member this.Fov
         with get () = this.GetValue(ImageViewControl.FovProperty)
@@ -393,10 +379,22 @@ type ImageViewControl() as this =
             this.SetValue(ImageViewControl.DirectionProperty, value)
             |> ignore
 
+    member this.Pan
+        with get () = this.GetValue(ImageViewControl.PanProperty)
+        and set (value) =
+            this.SetValue(ImageViewControl.PanProperty, value)
+            |> ignore
+
     member this.Image
         with get (): Bitmap option = this.GetValue(ImageViewControl.ImageProperty)
         and set (value: Bitmap option) =
             this.SetValue(ImageViewControl.ImageProperty, value)
+            |> ignore
+
+    member this.ViewEquirectangular
+        with get () = this.GetValue(ImageViewControl.ViewEquirectangularProperty)
+        and set (value) =
+            this.SetValue(ImageViewControl.ViewEquirectangularProperty, value)
             |> ignore
 
     override this.OnOpenGlInit (gl) = 
@@ -413,8 +411,8 @@ type ImageViewControl() as this =
         let newResources, shader = setupShader gl newResources
         resources <- newResources
 
-        let scaling = (nonNull this.VisualRoot).RenderScaling
-        let sz = PixelSize(max 1 (this.Bounds.Width * scaling |> int), max 1 (this.Bounds.Height * scaling |> int))
+        let renderScaling = (nonNull this.VisualRoot).RenderScaling
+        let sz = PixelSize(max 1 (this.Bounds.Width * renderScaling |> int), max 1 (this.Bounds.Height * renderScaling |> int))
         gl.Viewport(0, 0, sz.Width, sz.Height)
 
         gl.BindFramebuffer(OpenGL.GlConsts.GL_FRAMEBUFFER, fb)
@@ -431,7 +429,7 @@ type ImageViewControl() as this =
         match tex with
         | None ->
             ()
-        | Some tex ->
+        | Some (tex, bmp)  ->
             gl.ActiveTexture(OpenGL.GlConsts.GL_TEXTURE0)
             checkError gl
             gl.BindTexture(OpenGL.GlConsts.GL_TEXTURE_2D, tex)
@@ -441,17 +439,14 @@ type ImageViewControl() as this =
             checkError gl
             glUniform1i.Value.Invoke(gl.GetUniformLocationString(shader, "u_tex"), 0) // Set texture unit 0
             checkError gl
+
+            glUniform1i.Value.Invoke(gl.GetUniformLocationString(shader, "u_useEquirectangular"), if this.ViewEquirectangular then 1 else 0)
+            checkError gl
             
             let fov = this.Fov |> toRad |> single
-            let aspect = this.Bounds.Width / this.Bounds.Height |> single
+            let aspect = this.Bounds.Width / this.Bounds.Height
             let distance = this.Distance |> single
 
-            let forward = Vector3.UnitY
-            let upward = Vector3.UnitZ
-            let cameraPos = forward * -distance
-            let worldViewMatrix = Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-            let viewProjectionMatrix = Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f, 10.0f)
-            let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
             let uniformMatrix4 name (mtx: Matrix4x4) =
                 use m = fixed [|
                     mtx.M11; mtx.M12; mtx.M13; mtx.M14;
@@ -460,22 +455,47 @@ type ImageViewControl() as this =
                     mtx.M41; mtx.M42; mtx.M43; mtx.M44;
                 |]
                 gl.UniformMatrix4fv(gl.GetUniformLocationString(shader, name), 1, true, NativeInterop.NativePtr.toVoidPtr m)
+                checkError gl
 
-            glUniform3f.Value.Invoke(gl.GetUniformLocationString(shader,"u_cameraWorldPos"), cameraPos.X, cameraPos.Y, cameraPos.Z)
-            uniformMatrix4 "u_projectionWorldMatrix" projectionWorldMatrix
+            if this.ViewEquirectangular then
+                let forward = Vector3.UnitY
+                let upward = Vector3.UnitZ
+                let cameraPos = forward * -distance
+                let worldViewMatrix = Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                let viewProjectionMatrix = Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect |> single, 1.0f, 10.0f)
+                let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
+                glUniform3f.Value.Invoke(gl.GetUniformLocationString(shader,"u_cameraWorldPos"), cameraPos.X, cameraPos.Y, cameraPos.Z)
+                checkError gl
+                uniformMatrix4 "u_projectionWorldMatrix" projectionWorldMatrix
 
-            let uniformMatrix3 name (mtx: Matrix4x4) =
-                use m = fixed [|
-                    mtx.M11; mtx.M12; mtx.M13;
-                    mtx.M21; mtx.M22; mtx.M23;
-                    mtx.M31; mtx.M32; mtx.M33;
-                |]
-                glUniformMatrix3fv.Value.Invoke(gl.GetUniformLocationString(shader, name), 1, true, NativeInterop.NativePtr.toVoidPtr m)
+                this.Direction
+                |> Quaternion.Inverse // Direction には視点の向きを設定しているが、回転行列としては対象物を回転させる必要があるため逆元を使う
+                |> Matrix4x4.CreateFromQuaternion
+                |> uniformMatrix4 "u_textureMatrix"
+            else
+                let forward = -Vector3.UnitZ
+                let upward = Vector3.UnitY
+                let imageAspect = (bmp.PixelSize.Width |> float) / (bmp.PixelSize.Height |> float)
+                let cameraPos = forward * -distance
+                let scale = 1.0 / (1.0 + this.Distance)
+                let scaleToFit =
+                    if imageAspect > aspect then
+                        Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
+                    else
+                        Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
+                let worldViewMatrix =
+                    Matrix4x4.CreateTranslation(this.Pan.X |> single, this.Pan.Y |> single, 1.0f) *
+                    Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
+                    scaleToFit *
+                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
+                let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
+                glUniform3f.Value.Invoke(gl.GetUniformLocationString(shader,"u_cameraWorldPos"), cameraPos.X, cameraPos.Y, cameraPos.Z)
+                checkError gl
+                uniformMatrix4 "u_projectionWorldMatrix" projectionWorldMatrix
 
-            this.Direction
-            |> Quaternion.Inverse // Direction には視点の向きを設定しているが、回転行列としては対象物を回転させる必要があるため逆元を使う
-            |> Matrix4x4.CreateFromQuaternion
-            |> uniformMatrix3 "u_rotMatrix"
+                Matrix4x4.Identity
+                |> uniformMatrix4 "u_textureMatrix"
 
             gl.BindVertexArray(vertices)
             checkError gl
@@ -602,8 +622,14 @@ module ImageViewControl =
         static member direction<'t when 't :> ImageViewControl>(value: Quaternion) : IAttr<'t> =
             AttrBuilder<'t>.CreateProperty<Quaternion>(ImageViewControl.DirectionProperty, value, ValueNone)
 
+        static member pan<'t when 't :> ImageViewControl>(value) =
+            AttrBuilder<'t>.CreateProperty(ImageViewControl.PanProperty, value, ValueNone)
+
         static member image<'t when 't :> ImageViewControl>(value: Bitmap option) : IAttr<'t> =
             AttrBuilder<'t>.CreateProperty<Bitmap option>(ImageViewControl.ImageProperty, value, ValueNone)
+
+        static member viewEquirectangular<'t when 't :> ImageViewControl>(value) =
+            AttrBuilder<'t>.CreateProperty<bool>(ImageViewControl.ViewEquirectangularProperty, value, ValueNone)
 
         static member onDragMove<'t when 't :> InputElement>(func: DragMoveEventArgs-> unit, ?subPatchOptions) =
             AttrBuilder<'t>.CreateSubscription<DragMoveEventArgs>(DragMoveGestureRecognizer.DragMoveEvent, func, ?subPatchOptions = subPatchOptions)
@@ -625,6 +651,8 @@ module Viewer =
         distance: float
         yaw: float<deg>
         pitch: float<deg>
+        pan: Vector
+        useEquirectangular: bool
     }
 
     type Msg =
@@ -636,7 +664,8 @@ module Viewer =
     | OpenFolder of IStorageFolder
     | Zoom of float
     | ZoomFov of float
-    | DirectionDelta of delta: Vector2 * size: Vector2
+    | DragMove of delta: Vector * size: Vector * renderScaling: float
+    | SetViewEquirectangular of bool
     | Exit
 
     let openImageFileAsync (file: IStorageFile) =
@@ -704,9 +733,9 @@ module Viewer =
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTaskOnUIThread.perform (openImageByPath host) path OpenImage
-            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg> }, cmd
+            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false }, cmd
         | None ->
-            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg> }, Cmd.none
+            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
@@ -768,46 +797,75 @@ module Viewer =
         | ZoomFov delta ->
             let newFov = state.fov + delta * 0.5<deg> |> max 10.0<deg> |> min 90.0<deg>
             { state with fov = newFov }, Cmd.none
-        | DirectionDelta (screenDelta , screenSize) ->
-            let fov = state.fov |> toRad |> single
-            let aspect = screenSize.X / screenSize.Y |> single
-            let distance = state.distance |> single
+        | DragMove (screenDelta , screenSize, renderScaling) ->
+            if state.useEquirectangular then
+                let fov = state.fov |> toRad |> single
+                let aspect = screenSize.X / screenSize.Y |> single
+                let distance = state.distance |> single
 
-            let forward = Vector3.UnitY
-            let upward = Vector3.UnitZ
-            let cameraPos = forward * -distance
-            let worldViewMatrix =
-                Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-            let viewProjectionMatrix =
-                Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
-            let projectionViewportMatrix =
-                Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X, screenSize.Y, 0.0f, 1.0f)
-            let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
-            let fromDir = forward - cameraPos
-            let toDir = Vector3.Transform(
-                Vector3(screenDelta.X + (screenSize.X / 2.0f), screenDelta.Y + (screenSize.Y / 2.0f), 0.0f), 
-                viewportWorldMatrix)
-            let toDir1 = Vector3(toDir.X, toDir.Y, 0.0f) |> Vector3.Normalize
-            let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
-            let yawDelta = angleFromTo fromDir toDir1 Vector3.UnitZ |> toDeg
-            let pitchDelta = angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg
-            let yaw = state.yaw + yawDelta
-            let yaw =
-                if yaw > 180.0<deg> then
-                    yaw - 360.0<deg>
-                else if yaw < -180.0<deg> then
-                    yaw + 360.0<deg>
-                else
-                    yaw
-            let pitch = clamp -90.0<deg> 90.0<deg> (state.pitch + pitchDelta)
-            { state with yaw = yaw; pitch = pitch }, Cmd.none
-
+                let forward = Vector3.UnitY
+                let upward = Vector3.UnitZ
+                let cameraPos = forward * -distance
+                let worldViewMatrix =
+                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                let viewProjectionMatrix =
+                    Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
+                let projectionViewportMatrix =
+                    Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X |> single, screenSize.Y |> single, 0.0f, 1.0f)
+                let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
+                let fromDir = forward - cameraPos
+                let toDir = Vector3.Transform(
+                    Vector3((screenDelta.X + (screenSize.X / 2.0)) |> single, (screenDelta.Y + (screenSize.Y / 2.0)) |> single, 0.0f), 
+                    viewportWorldMatrix)
+                let toDir1 = Vector3(toDir.X, toDir.Y, 0.0f) |> Vector3.Normalize
+                let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
+                let yawDelta = angleFromTo fromDir toDir1 Vector3.UnitZ |> toDeg
+                let pitchDelta = angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg
+                let yaw = state.yaw + yawDelta
+                let yaw =
+                    if yaw > 180.0<deg> then
+                        yaw - 360.0<deg>
+                    else if yaw < -180.0<deg> then
+                        yaw + 360.0<deg>
+                    else
+                        yaw
+                let pitch = clamp -90.0<deg> 90.0<deg> (state.pitch + pitchDelta)
+                { state with yaw = yaw; pitch = pitch }, Cmd.none
+            else
+                match state.image with
+                | None ->
+                    state, Cmd.none
+                | Some { bitmap=bmp } ->
+                    let forward = -Vector3.UnitZ
+                    let upward = Vector3.UnitY
+                    let aspect = screenSize.X / screenSize.Y
+                    let imageAspect = (bmp.PixelSize.Width |> float) / (bmp.PixelSize.Height |> float)
+                    let cameraPos = forward * single -state.distance
+                    let scale = 1.0 / (1.0 + state.distance)
+                    let scaleToFit =
+                        if imageAspect > aspect then
+                            Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
+                        else
+                            Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
+                    let worldViewMatrix =
+                        Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
+                        scaleToFit *
+                        Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                    let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
+                    let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
+                    let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
+                    let pan = Vector(
+                        state.pan.X + float delta.X |> clamp -1.0 1.0,
+                        state.pan.Y - float delta.Y |> clamp -1.0 1.0
+                    )
+                    { state with pan = pan }, Cmd.none
+        | SetViewEquirectangular value ->
+            { state with useEquirectangular = value }, Cmd.none
         | Exit ->
             host.Close()
             state, Cmd.none
-    
 
-    let view (state: State) (dispatch) =
+    let view (host: HostWindow) (state: State) (dispatch) =
         DockPanel.create [
             DragDrop.allowDrop true
             DragDrop.onDrop (fun args ->
@@ -837,6 +895,23 @@ module Viewer =
                                 ]
                             ]
                         ]
+                        MenuItem.create [
+                            MenuItem.header "View"
+                            MenuItem.viewItems [
+                                MenuItem.create [
+                                    MenuItem.header "Flat (2D)"
+                                    MenuItem.toggleType MenuItemToggleType.Radio
+                                    MenuItem.isChecked (not state.useEquirectangular)
+                                    MenuItem.onClick (fun _ -> SetViewEquirectangular false |> dispatch)
+                                ]
+                                MenuItem.create [
+                                    MenuItem.header "360° Spherical"
+                                    MenuItem.toggleType MenuItemToggleType.Radio
+                                    MenuItem.isChecked state.useEquirectangular
+                                    MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
+                                ]
+                            ]
+                        ]
                     ]
                 ]
                 Grid.create [
@@ -856,6 +931,8 @@ module Viewer =
                             ImageViewControl.fov state.fov
                             ImageViewControl.distance state.distance
                             ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.yaw |> toRad) (state.pitch |> toRad) 0.0)
+                            ImageViewControl.pan state.pan
+                            ImageViewControl.viewEquirectangular state.useEquirectangular
                             ImageViewControl.onPointerWheelChanged 
                                 (fun args ->
                                     if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
@@ -869,10 +946,11 @@ module Viewer =
                                 | :? ImageViewControl as ivc ->
                                     args.Handled <- true
                                     (
-                                        Vector2(args.Delta.X |> float32, args.Delta.Y |> float32),
-                                        Vector2(ivc.Bounds.Width |> float32, ivc.Bounds.Height |> float32)
+                                        Vector(args.Delta.X, args.Delta.Y),
+                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height),
+                                        host.RenderScaling
                                     )
-                                    |> DirectionDelta
+                                    |> DragMove
                                     |> dispatch
                                 |_ -> ()
                             )
@@ -908,9 +986,7 @@ type MainWindow (args: string array) as this =
         base.Height <- 400.0
         base.Width <- 400.0
 
-        //this.VisualRoot.VisualRoot.Renderer.DrawFps <- true
-        //this.VisualRoot.VisualRoot.Renderer.DrawDirtyRects <- true
-        Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) Viewer.view
+        Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
         |> Program.withHost this
         |> Program.withConsoleTrace
         |> Program.runWith args
