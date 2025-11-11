@@ -1,5 +1,4 @@
 open System.Numerics
-open System.Collections.Generic
 open System.Collections.Immutable
 open FSharp.Control
 open Elmish
@@ -636,13 +635,13 @@ module ImageViewControl =
 
 module Viewer =
     open Avalonia.FuncUI.DSL
-    open Avalonia.Controls
     open Avalonia.Layout
 
     type Image = {
         bitmap: Bitmap
         file: IStorageFile
         folder: IStorageFolder option
+        equirectangular: bool
     }
 
     type State = {
@@ -668,12 +667,36 @@ module Viewer =
     | SetViewEquirectangular of bool
     | Exit
 
+    let openImageFileWithFolderAsync (file: IStorageFile) (folder: IStorageFolder option) =
+        task {
+            use! strm = file.OpenReadAsync()
+            let metadata = MetadataExtractor.ImageMetadataReader.ReadMetadata(strm)
+            let useEquirectangular =
+                metadata
+                |> Seq.tryPick (fun dir ->
+                    match dir with
+                    | :? MetadataExtractor.Formats.Xmp.XmpDirectory as xmpDir ->
+                        let props = xmpDir.GetXmpProperties()
+                        match (props.TryGetValue "GPano:ProjectionType", props.TryGetValue "GPano:UsePanoramaViewer") with
+                        | ((true, v1), (true, v2)) ->
+                            (String.Equals(v1, "equirectangular", StringComparison.InvariantCultureIgnoreCase) && XmpCore.XmpUtils.ConvertToBoolean(v2)) |> Some
+                        | ((true, v1), (false, _)) ->
+                            String.Equals(v1, "equirectangular", StringComparison.InvariantCultureIgnoreCase) |> Some
+                        | ((false, _), _) ->
+                            Some false
+                    | _ ->
+                        None
+                )
+                |> Option.defaultValue false
+            strm.Position <- 0
+            return { bitmap=new Bitmap(strm); file=file; folder=folder; equirectangular=useEquirectangular } |> Some
+        }
+
     let openImageFileAsync (file: IStorageFile) =
         task {
             let! folder = file.GetParentAsync()
             let folder = Option.ofObj folder
-            use! strm = file.OpenReadAsync()
-            return { bitmap=new Bitmap(strm); file=file; folder=folder } |> Some
+            return! openImageFileWithFolderAsync file folder
         }
 
     let isImageFile (item: IStorageItem) =
@@ -684,7 +707,7 @@ module Viewer =
                 |> Option.ofObj
                 |> Option.map _.ToLowerInvariant()
                 |> Option.defaultValue ""
-            if ext = ".jpg" || ext = ".png" || ext = ".webp" || ext = ".bmp" then
+            if ext = ".jpg" || ext = ".png" || ext = ".webp" || ext = ".bmp" || ext = ".avif" then
                 Some f
             else
                 None
@@ -698,8 +721,7 @@ module Viewer =
         task {
             match! getImagesFromFolderAsync folder |> TaskSeq.tryHead with
             | Some file ->
-                use! strm = file.OpenReadAsync()
-                return { bitmap=new Bitmap(strm); file=file; folder=Some folder } |> Some
+                return! openImageFileWithFolderAsync file (Some folder)
             | None ->
                 return None
         }
@@ -707,7 +729,7 @@ module Viewer =
     let selectImageAsync (host: HostWindow) =
         task {
             let filters = [
-                Platform.Storage.FilePickerFileType("Image Files", Patterns=["*.jpg"; "*.png"; "*.webp"; "*.bmp"])
+                Platform.Storage.FilePickerFileType("Image Files", Patterns=["*.jpg"; "*.png"; "*.webp"; "*.bmp"; "*.avif"])
             ]
             let! files =
                 Platform.Storage.FilePickerOpenOptions(AllowMultiple=false, FileTypeFilter=filters)
@@ -784,7 +806,7 @@ module Viewer =
             state.image |> Option.iter (fun { bitmap=bmp } -> bmp.Dispose())
             match value with
             | None -> state, Cmd.none
-            | Some img -> { state with image = Some img }, Cmd.none
+            | Some img -> { state with image = Some img; useEquirectangular = img.equirectangular }, Cmd.none
         | OpenFile file ->
             let cmd = Cmd.OfTaskOnUIThread.perform openImageFileAsync file OpenImage
             state, cmd

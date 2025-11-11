@@ -17,6 +17,7 @@
     <PackageReference Include="Avalonia.Themes.Simple" Version="11.3.8" />
     <PackageReference Include="Classic.Avalonia.Theme" Version="11.3.0" />
     <PackageReference Include="FSharp.Control.TaskSeq" Version="0.4.0" />
+    <PackageReference Include="MetadataExtractor" Version="2.9.0" />
   </ItemGroup>
 
 </Project>
