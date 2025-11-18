@@ -928,10 +928,10 @@ module Viewer =
             state, Cmd.none
 
     let view (host: HostWindow) (state: State) (dispatch) =
-        DockPanel.create [
-            DockPanel.classes ["root"]
-            DockPanel.allowDrop true
-            DockPanel.onDrop (fun args ->
+        Grid.create [
+            Grid.classes ["root"]
+            Grid.allowDrop true
+            Grid.onDrop (fun args ->
                 match args.DataTransfer.TryGetFile() with
                 | :? IStorageFile as file ->
                     OpenFile file |> dispatch
@@ -939,9 +939,75 @@ module Viewer =
                     OpenFolder folder |> dispatch
                 | _ -> ()
             )
-            DockPanel.children [
+            Grid.columnDefinitions [
+                ColumnDefinition(1.0, GridUnitType.Star, MinWidth=40.0, MaxWidth=80.0)
+                ColumnDefinition(8.0, GridUnitType.Star)
+                ColumnDefinition(1.0, GridUnitType.Star, MinWidth=40.0, MaxWidth=80.0)
+            ]
+            Grid.rowDefinitions "Auto, *"
+            Grid.children [
+                ImageViewControl.create [
+                    ImageViewControl.init (fun ivc ->
+                        ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
+                    )
+                    ImageViewControl.row 0
+                    ImageViewControl.rowSpan 2
+                    ImageViewControl.column 0
+                    ImageViewControl.columnSpan 3
+                    ImageViewControl.horizontalAlignment HorizontalAlignment.Stretch
+                    ImageViewControl.verticalAlignment VerticalAlignment.Stretch
+                    ImageViewControl.image (state.image |> Option.map _.bitmap)
+                    ImageViewControl.fov state.fov
+                    ImageViewControl.distance state.distance
+                    ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.yaw |> toRad) (state.pitch |> toRad) 0.0)
+                    ImageViewControl.pan state.pan
+                    ImageViewControl.viewEquirectangular state.useEquirectangular
+                    ImageViewControl.onPointerWheelChanged 
+                        (fun args ->
+                            if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
+                                ZoomFov -args.Delta.Y
+                            else
+                                Zoom -args.Delta.Y
+                            |> dispatch
+                        )
+                    ImageViewControl.onDragMove (fun args ->
+                        match args.Source with
+                        | :? ImageViewControl as ivc ->
+                            args.Handled <- true
+                            (
+                                Vector(args.Delta.X, args.Delta.Y),
+                                Vector(ivc.Bounds.Width, ivc.Bounds.Height),
+                                host.RenderScaling
+                            )
+                            |> DragMove
+                            |> dispatch
+                        |_ -> ()
+                    )
+                ]
+                Button.create [
+                    Button.classes ["nav-button"]
+                    Button.row 1
+                    Button.column 0
+                    Button.onClick (fun _ -> dispatch PreviousImage)
+                    Button.content "◀"
+                    Button.verticalContentAlignment VerticalAlignment.Center
+                    Button.horizontalAlignment HorizontalAlignment.Stretch
+                    Button.verticalAlignment VerticalAlignment.Stretch
+                ]
+                Button.create [
+                    Button.classes ["nav-button"]
+                    Button.row 1
+                    Button.column 2
+                    Button.onClick (fun _ -> dispatch NextImage)
+                    Button.content "▶"
+                    Button.verticalContentAlignment VerticalAlignment.Center
+                    Button.horizontalAlignment HorizontalAlignment.Stretch
+                    Button.verticalAlignment VerticalAlignment.Stretch
+                ]
                 Menu.create [
-                    Menu.dock Dock.Top
+                    Menu.row 0
+                    Menu.column 0
+                    Menu.columnSpan 3
                     Menu.horizontalAlignment HorizontalAlignment.Stretch
                     Menu.verticalAlignment VerticalAlignment.Top
                     Menu.viewItems [
@@ -974,69 +1040,6 @@ module Viewer =
                                     MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
                                 ]
                             ]
-                        ]
-                    ]
-                ]
-                Grid.create [
-                    Grid.columnDefinitions "Auto, *, Auto"
-                    Grid.rowDefinitions "*"
-                    Grid.children [
-                        ImageViewControl.create [
-                            ImageViewControl.init (fun ivc ->
-                                ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
-                            )
-                            ImageViewControl.row 0
-                            ImageViewControl.column 0
-                            ImageViewControl.columnSpan 3
-                            ImageViewControl.horizontalAlignment HorizontalAlignment.Stretch
-                            ImageViewControl.verticalAlignment VerticalAlignment.Stretch
-                            ImageViewControl.image (state.image |> Option.map _.bitmap)
-                            ImageViewControl.fov state.fov
-                            ImageViewControl.distance state.distance
-                            ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.yaw |> toRad) (state.pitch |> toRad) 0.0)
-                            ImageViewControl.pan state.pan
-                            ImageViewControl.viewEquirectangular state.useEquirectangular
-                            ImageViewControl.onPointerWheelChanged 
-                                (fun args ->
-                                    if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
-                                        ZoomFov -args.Delta.Y
-                                    else
-                                        Zoom -args.Delta.Y
-                                    |> dispatch
-                                )
-                            ImageViewControl.onDragMove (fun args ->
-                                match args.Source with
-                                | :? ImageViewControl as ivc ->
-                                    args.Handled <- true
-                                    (
-                                        Vector(args.Delta.X, args.Delta.Y),
-                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height),
-                                        host.RenderScaling
-                                    )
-                                    |> DragMove
-                                    |> dispatch
-                                |_ -> ()
-                            )
-                        ]
-                        Button.create [
-                            Button.classes ["nav-button"]
-                            Button.row 0
-                            Button.column 0
-                            Button.onClick (fun _ -> dispatch PreviousImage)
-                            Button.content "◀"
-                            Button.verticalContentAlignment VerticalAlignment.Center
-                            Button.horizontalAlignment HorizontalAlignment.Stretch
-                            Button.verticalAlignment VerticalAlignment.Stretch
-                        ]
-                        Button.create [
-                            Button.classes ["nav-button"]
-                            Button.row 0
-                            Button.column 2
-                            Button.onClick (fun _ -> dispatch NextImage)
-                            Button.content "▶"
-                            Button.verticalContentAlignment VerticalAlignment.Center
-                            Button.horizontalAlignment HorizontalAlignment.Stretch
-                            Button.verticalAlignment VerticalAlignment.Stretch
                         ]
                     ]
                 ]
@@ -1089,6 +1092,10 @@ type MainWindow (args: string array) as this =
     override this.OnKeyDown (e: KeyEventArgs): unit = 
         this.Activate()
         base.OnKeyDown(e: KeyEventArgs)
+
+    override this.OnResized (e: WindowResizedEventArgs): unit = 
+        this.Activate()
+        base.OnResized(e: WindowResizedEventArgs)
 
 type App() =
     inherit Application()
