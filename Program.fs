@@ -11,9 +11,11 @@ open Avalonia.Input.GestureRecognizers
 open Avalonia.Interactivity
 open Avalonia.Rendering
 open Avalonia.Platform.Storage
+open Avalonia.FuncUI
 open Avalonia.FuncUI.Hosts
 open Avalonia.FuncUI.Elmish
 open System
+open Avalonia.Threading
 
 // Allow unsafe code for pointer operations
 #nowarn 9
@@ -504,6 +506,7 @@ type ImageViewControl() as this =
 
 type DragState =
     | NotStarted
+    | Pressed of Pointers: ImmutableHashSet<IPointer> * LastPoint: Point * StartTime: System.DateTime
     | Dragging of Pointers: ImmutableHashSet<IPointer> * LastPoint: Point * StartTime: System.DateTime
 
 type DragMoveEventArgs (event, source: objnull, delta: Avalonia.Vector) =
@@ -524,17 +527,21 @@ type DragMoveGestureRecognizer () =
         | NotStarted ->
             match e.Pointer.Type with
             | PointerType.Mouse when point.Properties.IsLeftButtonPressed ->
-                dragState <- Dragging (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
-                e.Handled <- true
+                dragState <- Pressed (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
             | PointerType.Touch ->
-                dragState <- Dragging (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
-                e.Handled <- true
+                dragState <- Pressed (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
             | PointerType.Pen ->
-                dragState <- Dragging (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
-                e.Handled <- true
+                dragState <- Pressed (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
             | _ ->
                 // 他のポインタータイプは無視
-                e.Handled <- false
+                ()
+        | Pressed (pointers, lastPoint, startTime) ->
+            if pointers.Contains e.Pointer then
+                // 既にドラッグ中のポインタータイプの場合は無視
+                e.Handled <- true
+            else
+                // 新しいポインタータイプが追加された場合はドラッグ状態を更新
+                dragState <- Pressed (pointers.Add e.Pointer, lastPoint, startTime)
         | Dragging (pointers, lastPoint, startTime) ->
             if pointers.Contains e.Pointer then
                 // 既にドラッグ中のポインタータイプの場合は無視
@@ -548,15 +555,24 @@ type DragMoveGestureRecognizer () =
         | NotStarted ->
             // ドラッグが開始されていない場合は無視
             e.Handled <- false
+        | Pressed (pointers, lastPoint, startTime) ->
+            if pointers.Contains e.Pointer then
+                // ドラッグ中のポインタータイプがリリースされた場合
+                if pointers.Count = 1 then
+                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
+                    dragState <- NotStarted
+                    e.Handled <- false
+                else
+                    // 他のポインターが残っている場合はドラッグ状態を更新
+                    dragState <- Pressed (pointers.Remove e.Pointer, lastPoint, startTime)
+                    e.Handled <- true
+            else
+                // 他のポインタータイプがリリースされた場合は無視
+                e.Handled <- false
         | Dragging (pointers, lastPoint, startTime) ->
             if pointers.Contains e.Pointer then
                 // ドラッグ中のポインタータイプがリリースされた場合
                 let point = e.GetCurrentPoint(null)
-                let delta = point.Position - lastPoint
-                let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y))
-                match this.Target with
-                | Null -> ()
-                | NonNull target -> target.RaiseEvent args
                 if pointers.Count = 1 then
                     // 最後のポインターがリリースされた場合はドラッグ状態をリセット
                     dragState <- NotStarted
@@ -573,6 +589,14 @@ type DragMoveGestureRecognizer () =
         | NotStarted ->
             // ドラッグが開始されていない場合は無視
             ()
+        | Pressed (pointers, lastPoint, startTime) ->
+            if pointers.Contains pointer then
+                if pointers.Count = 1 then
+                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
+                    dragState <- NotStarted
+                else
+                    // 他のポインターが残っている場合はドラッグ状態を更新
+                    dragState <- Pressed (pointers.Remove pointer, lastPoint, startTime)
         | Dragging (pointers, lastPoint, startTime) ->
             if pointers.Contains pointer then
                 if pointers.Count = 1 then
@@ -587,6 +611,22 @@ type DragMoveGestureRecognizer () =
         | NotStarted ->
             // ドラッグが開始されていない場合は無視
             e.Handled <- false
+        | Pressed (pointers, lastPoint, startTime) ->
+            if pointers.Contains e.Pointer then
+                let point = e.GetCurrentPoint(null)
+                let delta = point.Position - lastPoint
+                if delta.X * delta.X + delta.Y * delta.Y > 8.0 * 8.0 then
+                    let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y))
+                    match this.Target with
+                    | Null -> ()
+                    | NonNull target -> target.RaiseEvent args
+                    dragState <- Dragging (pointers, point.Position, startTime)
+                else
+                    ()
+                e.Handled <- true
+            else
+                // 他のポインタータイプがリリースされた場合は無視
+                e.Handled <- false
         | Dragging (pointers, lastPoint, startTime) ->
             if pointers.Contains e.Pointer then
                 let point = e.GetCurrentPoint(null)
@@ -889,8 +929,9 @@ module Viewer =
 
     let view (host: HostWindow) (state: State) (dispatch) =
         DockPanel.create [
-            DragDrop.allowDrop true
-            DragDrop.onDrop (fun args ->
+            DockPanel.classes ["root"]
+            DockPanel.allowDrop true
+            DockPanel.onDrop (fun args ->
                 match args.DataTransfer.TryGetFile() with
                 | :? IStorageFile as file ->
                     OpenFile file |> dispatch
@@ -978,22 +1019,24 @@ module Viewer =
                             )
                         ]
                         Button.create [
+                            Button.classes ["nav-button"]
                             Button.row 0
                             Button.column 0
                             Button.onClick (fun _ -> dispatch PreviousImage)
-                            Button.content "←"
-                            Button.height 50.0
+                            Button.content "◀"
+                            Button.verticalContentAlignment VerticalAlignment.Center
                             Button.horizontalAlignment HorizontalAlignment.Stretch
-                            Button.verticalAlignment VerticalAlignment.Center
+                            Button.verticalAlignment VerticalAlignment.Stretch
                         ]
                         Button.create [
+                            Button.classes ["nav-button"]
                             Button.row 0
                             Button.column 2
                             Button.onClick (fun _ -> dispatch NextImage)
-                            Button.content "→"
-                            Button.height 50.0
+                            Button.content "▶"
+                            Button.verticalContentAlignment VerticalAlignment.Center
                             Button.horizontalAlignment HorizontalAlignment.Stretch
-                            Button.verticalAlignment VerticalAlignment.Center
+                            Button.verticalAlignment VerticalAlignment.Stretch
                         ]
                     ]
                 ]
@@ -1007,19 +1050,53 @@ type MainWindow (args: string array) as this =
         //base.Icon <- WindowIcon(System.IO.Path.Combine("Assets","Icons", "icon.ico"))
         base.Height <- 400.0
         base.Width <- 400.0
+        base.Classes.Add("main-window") |> ignore
 
         Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
         |> Program.withHost this
         |> Program.withConsoleTrace
         |> Program.runWith args
 
+    let mutable inactiveTimer: IDisposable option = None
+    let mutable ignorePointerMoved = false
+
+    member this.Activate () =
+        inactiveTimer |> Option.iter _.Dispose()
+        inactiveTimer <- (DispatcherTimer.RunOnce((fun () -> this.InActivate()), TimeSpan.FromSeconds(3.0)) |> Some)
+        this.PseudoClasses.Remove(":inactive") |> ignore
+
+    member this.InActivate () =
+        this.PseudoClasses.Add(":inactive")
+
+    override this.OnPointerMoved (e: PointerEventArgs): unit = 
+        if not ignorePointerMoved then
+            this.Activate()
+        ignorePointerMoved <- false
+        base.OnPointerMoved(e: PointerEventArgs)
+
+    override this.OnPointerCaptureLost (e: PointerCaptureLostEventArgs): unit = 
+        ignorePointerMoved <- true
+        base.OnPointerCaptureLost(e: PointerCaptureLostEventArgs)
+
+    override this.OnPointerWheelChanged (e: PointerWheelEventArgs): unit = 
+        this.Activate()
+        base.OnPointerWheelChanged(e: PointerWheelEventArgs)
+
+    override this.OnPointerReleased (e: PointerReleasedEventArgs): unit = 
+        this.Activate()
+        base.OnPointerReleased(e)
+
+    override this.OnKeyDown (e: KeyEventArgs): unit = 
+        this.Activate()
+        base.OnKeyDown(e: KeyEventArgs)
+
 type App() =
     inherit Application()
 
     override this.Initialize() =
-        this.Styles.Add (Avalonia.Themes.Fluent.FluentTheme())
-        //this.Styles.Add(Avalonia.Themes.Simple.SimpleTheme())
-        //this.Styles.Add(Classic.Avalonia.Theme.ClassicTheme())
+        this.Styles.Add(Avalonia.Themes.Simple.SimpleTheme())
+        this.Styles.Load "avares://ZenkeiViewer/Styles/Styles.axaml"
+        //this.RequestedThemeVariant <- Avalonia.Styling.ThemeVariant.Dark
 
     override this.OnFrameworkInitializationCompleted() =
         match this.ApplicationLifetime with
