@@ -673,6 +673,12 @@ module ImageViewControl =
         static member onDragMove<'t when 't :> InputElement>(func: DragMoveEventArgs-> unit, ?subPatchOptions) =
             AttrBuilder<'t>.CreateSubscription<DragMoveEventArgs>(DragMoveGestureRecognizer.DragMoveEvent, func, ?subPatchOptions = subPatchOptions)
 
+        static member onPinch<'t when 't :> InputElement>(func, ?subPatchOptions) =
+            AttrBuilder<'t>.CreateSubscription(Gestures.PinchEvent, func, ?subPatchOptions = subPatchOptions)
+
+        static member onPinchEnded<'t when 't :> InputElement>(func, ?subPatchOptions) =
+            AttrBuilder<'t>.CreateSubscription(Gestures.PinchEndedEvent, func, ?subPatchOptions = subPatchOptions)
+
 module Viewer =
     open Avalonia.FuncUI.DSL
     open Avalonia.Layout
@@ -686,6 +692,7 @@ module Viewer =
 
     type State = {
         image: Image option
+        zoomOrigin: float option
         fov: float<deg>
         distance: float
         yaw: float<deg>
@@ -702,6 +709,7 @@ module Viewer =
     | OpenFile of IStorageFile
     | OpenFolder of IStorageFolder
     | Zoom of float
+    | Zooming of float option
     | ZoomFov of float
     | DragMove of delta: Vector * size: Vector * renderScaling: float
     | SetViewEquirectangular of bool
@@ -795,9 +803,9 @@ module Viewer =
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTaskOnUIThread.perform (openImageByPath host) path OpenImage
-            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false }, cmd
+            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
         | None ->
-            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false }, Cmd.none
+            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
@@ -853,6 +861,13 @@ module Viewer =
         | OpenFolder folder ->
             let cmd = Cmd.OfTaskOnUIThread.perform openImageFileFromFolderAsync folder OpenImage
             state, cmd
+        | Zooming (Some scale) ->
+            let origin = Option.defaultValue state.distance state.zoomOrigin
+            let delta = 1.0 - scale
+            let newDist = origin + delta * 0.5 |> max -0.9 |> min 5.0
+            { state with distance = newDist; zoomOrigin = Some origin }, Cmd.none
+        | Zooming None ->
+            { state with zoomOrigin = None }, Cmd.none
         | Zoom delta ->
             let newDist = state.distance + delta * 0.05 |> max -0.9 |> min 5.0
             { state with distance = newDist }, Cmd.none
@@ -949,6 +964,7 @@ module Viewer =
                 ImageViewControl.create [
                     ImageViewControl.init (fun ivc ->
                         ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
+                        ivc.GestureRecognizers.Add(PinchGestureRecognizer())
                     )
                     ImageViewControl.row 0
                     ImageViewControl.rowSpan 2
@@ -982,6 +998,16 @@ module Viewer =
                             |> DragMove
                             |> dispatch
                         |_ -> ()
+                    )
+                    ImageViewControl.onPinch (fun args ->
+                        args.Handled <- true
+                        Zooming (Some args.Scale)
+                        |> dispatch
+                    )
+                    ImageViewControl.onPinchEnded (fun args ->
+                        args.Handled <- true
+                        Zooming None
+                        |> dispatch
                     )
                 ]
                 Button.create [
@@ -1080,10 +1106,6 @@ type MainWindow (args: string array) as this =
     override this.OnPointerCaptureLost (e: PointerCaptureLostEventArgs): unit = 
         ignorePointerMoved <- true
         base.OnPointerCaptureLost(e: PointerCaptureLostEventArgs)
-
-    override this.OnPointerWheelChanged (e: PointerWheelEventArgs): unit = 
-        this.Activate()
-        base.OnPointerWheelChanged(e: PointerWheelEventArgs)
 
     override this.OnPointerReleased (e: PointerReleasedEventArgs): unit = 
         this.Activate()
