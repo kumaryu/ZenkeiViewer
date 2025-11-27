@@ -1014,6 +1014,7 @@ module Viewer =
                     Button.classes ["nav-button"]
                     Button.row 1
                     Button.column 0
+                    Button.hotKey (KeyGesture(Key.Left, KeyModifiers.Alt))
                     Button.onClick (fun _ -> dispatch PreviousImage)
                     Button.content "◀"
                     Button.verticalContentAlignment VerticalAlignment.Center
@@ -1024,6 +1025,7 @@ module Viewer =
                     Button.classes ["nav-button"]
                     Button.row 1
                     Button.column 2
+                    Button.hotKey (KeyGesture(Key.Right, KeyModifiers.Alt))
                     Button.onClick (fun _ -> dispatch NextImage)
                     Button.content "▶"
                     Button.verticalContentAlignment VerticalAlignment.Center
@@ -1042,8 +1044,10 @@ module Viewer =
                             MenuItem.viewItems [
                                 MenuItem.create [
                                     MenuItem.header "Open"
+                                    MenuItem.hotKey (KeyGesture(Key.O, KeyModifiers.Control))
                                     MenuItem.onClick (fun _ -> dispatch SelectImage)
                                 ]
+                                Separator.create []
                                 MenuItem.create [
                                     MenuItem.header "Exit"
                                     MenuItem.onClick (fun _ -> dispatch Exit)
@@ -1064,6 +1068,17 @@ module Viewer =
                                     MenuItem.toggleType MenuItemToggleType.Radio
                                     MenuItem.isChecked state.useEquirectangular
                                     MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
+                                ]
+                                Separator.create []
+                                MenuItem.create [
+                                    MenuItem.header "Zoom in"
+                                    MenuItem.hotKey (KeyGesture(Key.OemPlus))
+                                    MenuItem.onClick (fun _ -> Zoom -1.0 |> dispatch)
+                                ]
+                                MenuItem.create [
+                                    MenuItem.header "Zoom out"
+                                    MenuItem.hotKey (KeyGesture(Key.OemMinus))
+                                    MenuItem.onClick (fun _ -> Zoom 1.0 |> dispatch)
                                 ]
                             ]
                         ]
