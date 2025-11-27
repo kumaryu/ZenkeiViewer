@@ -266,7 +266,7 @@ type ImageViewControl() as this =
         void main() {
             if (u_useEquirectangular) {
                 vec4 viewPos = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
-                vec3 viewVec = vec3(viewPos.xy, viewPos.z / viewPos.w) - u_cameraWorldPos;
+                vec3 viewVec = viewPos.xyz / viewPos.w - u_cameraWorldPos;
                 vec3 q = u_cameraWorldPos - SpherePos;
                 float r = SphereRadius;
                 float a = dot(viewVec, viewVec);
@@ -463,7 +463,7 @@ type ImageViewControl() as this =
                 let upward = Vector3.UnitZ
                 let cameraPos = forward * -distance
                 let worldViewMatrix = Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                let viewProjectionMatrix = Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect |> single, 1.0f, 10.0f)
+                let viewProjectionMatrix = Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect |> single, 1.0f + distance, 10.0f + distance)
                 let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
                 glUniform3f.Value.Invoke(gl.GetUniformLocationString(shader,"u_cameraWorldPos"), cameraPos.X, cameraPos.Y, cameraPos.Z)
                 checkError gl
@@ -864,16 +864,20 @@ module Viewer =
         | Zooming (Some scale) ->
             let origin = Option.defaultValue state.distance state.zoomOrigin
             let delta = 1.0 - scale
-            let newDist = origin + delta * 0.5 |> max -0.9 |> min 5.0
+            let distanceScale = 1.0 / tan(state.fov / 2.0 |> toRad |> float)
+            let newDist = origin + delta * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
             { state with distance = newDist; zoomOrigin = Some origin }, Cmd.none
         | Zooming None ->
             { state with zoomOrigin = None }, Cmd.none
         | Zoom delta ->
-            let newDist = state.distance + delta * 0.05 |> max -0.9 |> min 5.0
+            let distanceScale = 1.0 / tan(state.fov / 2.0 |> toRad |> float)
+            let newDist = state.distance + delta * 0.05 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
             { state with distance = newDist }, Cmd.none
         | ZoomFov delta ->
-            let newFov = state.fov + delta * 0.5<deg> |> max 10.0<deg> |> min 90.0<deg>
-            { state with fov = newFov }, Cmd.none
+            let newFov = state.fov + delta * 2.5<deg> |> max 5.0<deg> |> min 90.0<deg>
+            let nearPlaneHeight = 2.0 * (state.distance + 1.0) * Math.Tan(state.fov / 2.0 |> toRad |> float)
+            let newDistance = (nearPlaneHeight / 2.0) / Math.Tan(newFov / 2.0 |> toRad |> float) - 1.0
+            { state with distance = newDistance; fov = newFov }, Cmd.none
         | DragMove (screenDelta , screenSize, renderScaling) ->
             if state.useEquirectangular then
                 let fov = state.fov |> toRad |> single
