@@ -64,18 +64,6 @@ module Matrix4x4 =
         else
             Matrix4x4.Identity
 
-module Cmd =
-    module OfTaskOnUIThread =
-        let perform (task: 'a -> System.Threading.Tasks.Task<'b>)
-                    (arg:'a)
-                    (ofSuccess: 'b -> 'msg) : Cmd<'msg> =
-            Cmd.OfTask.perform (fun arg ->
-                Avalonia.Threading.Dispatcher.UIThread.InvokeAsync<'b>(fun () ->
-                    TaskBuilder.task {
-                        return! task arg
-                    }
-                )) arg ofSuccess
-
 module GlConsts =
     let GL_TEXTURE_WRAP_S = 0x2802
     let GL_TEXTURE_WRAP_T = 0x2803
@@ -805,7 +793,7 @@ module Viewer =
     let init (host: HostWindow) args =
         match Array.tryHead args with
         | Some path ->
-            let cmd = Cmd.OfTaskOnUIThread.perform (openImageByPath host) path OpenImage
+            let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
             { fullScreen=false; fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
         | None ->
             { fullScreen=false; fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
@@ -827,7 +815,7 @@ module Viewer =
                             |> Option.defaultValue file
                             |> openImageFileAsync
                     }
-                let cmd = Cmd.OfTaskOnUIThread.perform getNextImage () OpenImage
+                let cmd = Cmd.OfTask.perform getNextImage () OpenImage
                 state, cmd
             | _ ->
                 state, Cmd.none
@@ -846,12 +834,12 @@ module Viewer =
                             |> Option.defaultValue file
                             |> openImageFileAsync
                     }
-                let cmd = Cmd.OfTaskOnUIThread.perform getPreviousImage () OpenImage
+                let cmd = Cmd.OfTask.perform getPreviousImage () OpenImage
                 state, cmd
             | _ ->
                 state, Cmd.none
         | SelectImage ->
-            let cmd = Cmd.OfTaskOnUIThread.perform selectImageAsync host OpenImage
+            let cmd = Cmd.OfTask.perform selectImageAsync host OpenImage
             state, cmd
         | OpenImage value ->
             state.image |> Option.iter (fun { bitmap=bmp } -> bmp.Dispose())
@@ -859,10 +847,10 @@ module Viewer =
             | None -> state, Cmd.none
             | Some img -> { state with image = Some img; useEquirectangular = img.equirectangular }, Cmd.none
         | OpenFile file ->
-            let cmd = Cmd.OfTaskOnUIThread.perform openImageFileAsync file OpenImage
+            let cmd = Cmd.OfTask.perform openImageFileAsync file OpenImage
             state, cmd
         | OpenFolder folder ->
-            let cmd = Cmd.OfTaskOnUIThread.perform openImageFileFromFolderAsync folder OpenImage
+            let cmd = Cmd.OfTask.perform openImageFileFromFolderAsync folder OpenImage
             state, cmd
         | Zooming (Some scale) ->
             let origin = Option.defaultValue state.distance state.zoomOrigin
@@ -1186,7 +1174,7 @@ type MainWindow (args: string array) as this =
         |> Program.withHost this
         |> Program.withSubscription subscriptions
         |> Program.withConsoleTrace
-        |> Program.runWith args
+        |> Program.runWithAvaloniaSyncDispatch args
 
     let mutable inactiveTimer: IDisposable option = None
     let mutable ignorePointerMoved = false
