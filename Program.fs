@@ -339,7 +339,7 @@ type ImageViewControl() as this =
             { resources with Shader = Some program }, program
 
     static let fovProperty : StyledProperty<float<deg>> =
-        AvaloniaProperty.Register<ImageViewControl, float<deg>>("Fov", 90.0<deg>)
+        AvaloniaProperty.Register<ImageViewControl, float<deg>>("Fov", 60.0<deg>)
     static let distanceProperty : StyledProperty<float> =
         AvaloniaProperty.Register<ImageViewControl, float>("Distance", 0.0)
     static let directionProperty : StyledProperty<Quaternion> =
@@ -803,9 +803,9 @@ module Viewer =
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTaskOnUIThread.perform (openImageByPath host) path OpenImage
-            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
+            { fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
         | None ->
-            { fov=90.0<deg>; distance=0.0; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
+            { fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
@@ -1111,8 +1111,6 @@ type MainWindow (args: string array) as this =
     do
         base.Title <- "Zenkei Viewer"
         //base.Icon <- WindowIcon(System.IO.Path.Combine("Assets","Icons", "icon.ico"))
-        base.Height <- 400.0
-        base.Width <- 400.0
         base.Classes.Add("main-window") |> ignore
 
         Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
