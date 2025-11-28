@@ -1049,6 +1049,7 @@ module Viewer =
                                 MenuItem.create [
                                     MenuItem.header "Open"
                                     MenuItem.hotKey (KeyGesture(Key.O, KeyModifiers.Control))
+                                    MenuItem.inputGesture (KeyGesture(Key.O, KeyModifiers.Control))
                                     MenuItem.onClick (fun _ -> dispatch SelectImage)
                                 ]
                                 Separator.create []
@@ -1077,12 +1078,26 @@ module Viewer =
                                 MenuItem.create [
                                     MenuItem.header "Zoom in"
                                     MenuItem.hotKey (KeyGesture(Key.OemPlus))
+                                    MenuItem.inputGesture (KeyGesture(Key.OemPlus))
                                     MenuItem.onClick (fun _ -> Zoom -1.0 |> dispatch)
                                 ]
                                 MenuItem.create [
                                     MenuItem.header "Zoom out"
                                     MenuItem.hotKey (KeyGesture(Key.OemMinus))
+                                    MenuItem.inputGesture (KeyGesture(Key.OemMinus))
                                     MenuItem.onClick (fun _ -> Zoom 1.0 |> dispatch)
+                                ]
+                                MenuItem.create [
+                                    MenuItem.header "Warp"
+                                    MenuItem.hotKey (KeyGesture(Key.OemPlus, KeyModifiers.Shift))
+                                    MenuItem.inputGesture (KeyGesture(Key.OemPlus, KeyModifiers.Shift))
+                                    MenuItem.onClick (fun _ -> ZoomFov -1.0 |> dispatch)
+                                ]
+                                MenuItem.create [
+                                    MenuItem.header "Dewarp"
+                                    MenuItem.hotKey (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
+                                    MenuItem.inputGesture (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
+                                    MenuItem.onClick (fun _ -> ZoomFov 1.0 |> dispatch)
                                 ]
                             ]
                         ]
