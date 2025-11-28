@@ -970,6 +970,7 @@ module Viewer =
                         ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
                         ivc.GestureRecognizers.Add(PinchGestureRecognizer())
                     )
+                    ImageViewControl.focusable true
                     ImageViewControl.row 0
                     ImageViewControl.rowSpan 2
                     ImageViewControl.column 0
@@ -1012,6 +1013,40 @@ module Viewer =
                         args.Handled <- true
                         Zooming None
                         |> dispatch
+                    )
+                    ImageViewControl.onKeyDown (fun args ->
+                        match args.Source with
+                        | :? ImageViewControl as ivc ->
+                            if args.KeyModifiers = KeyModifiers.None || args.KeyModifiers = KeyModifiers.Shift then
+                                let k =
+                                    if args.KeyModifiers = KeyModifiers.Shift then
+                                        20.0
+                                    else
+                                        10.0
+
+                                let move v =
+                                    (
+                                        v,
+                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height),
+                                        host.RenderScaling
+                                    )
+                                    |> DragMove
+                                    |> dispatch
+                                match args.Key with
+                                | Key.Left ->
+                                    args.Handled <- true
+                                    move (Vector(k, 0.0))
+                                | Key.Right ->
+                                    args.Handled <- true
+                                    move (Vector(-k, 0.0))
+                                | Key.Up ->
+                                    args.Handled <- true
+                                    move (Vector(0.0, k))
+                                | Key.Down ->
+                                    args.Handled <- true
+                                    move (Vector(0.0, -k))
+                                | _ -> ()
+                        | _ -> ()
                     )
                 ]
                 Button.create [
