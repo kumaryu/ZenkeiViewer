@@ -691,6 +691,7 @@ module Viewer =
     }
 
     type State = {
+        fullScreen: bool
         image: Image option
         zoomOrigin: float option
         fov: float<deg>
@@ -713,6 +714,8 @@ module Viewer =
     | ZoomFov of float
     | DragMove of delta: Vector * size: Vector * renderScaling: float
     | SetViewEquirectangular of bool
+    | ToggleFullScreen
+    | ExitFullScreen
     | Exit
 
     let openImageFileWithFolderAsync (file: IStorageFile) (folder: IStorageFolder option) =
@@ -803,9 +806,9 @@ module Viewer =
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTaskOnUIThread.perform (openImageByPath host) path OpenImage
-            { fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
+            { fullScreen=false; fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
         | None ->
-            { fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
+            { fullScreen=false; fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
@@ -942,6 +945,16 @@ module Viewer =
                     { state with pan = pan }, Cmd.none
         | SetViewEquirectangular value ->
             { state with useEquirectangular = value }, Cmd.none
+        | ToggleFullScreen ->
+            if state.fullScreen then
+                host.WindowState <- WindowState.Normal
+            else
+                host.WindowState <- WindowState.FullScreen
+            { state with fullScreen = not state.fullScreen }, Cmd.none
+        | ExitFullScreen ->
+            if state.fullScreen then
+                host.WindowState <- WindowState.Normal
+            { state with fullScreen = false }, Cmd.none
         | Exit ->
             host.Close()
             state, Cmd.none
@@ -1134,6 +1147,15 @@ module Viewer =
                                     MenuItem.inputGesture (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
                                     MenuItem.onClick (fun _ -> ZoomFov 1.0 |> dispatch)
                                 ]
+                                Separator.create []
+                                MenuItem.create [
+                                    MenuItem.header "Fullscreen"
+                                    MenuItem.hotKey (KeyGesture(Key.F11))
+                                    MenuItem.inputGesture (KeyGesture(Key.F11))
+                                    MenuItem.toggleType MenuItemToggleType.CheckBox
+                                    MenuItem.isChecked state.fullScreen
+                                    MenuItem.onClick (fun _ -> ToggleFullScreen |> dispatch )
+                                ]
                             ]
                         ]
                     ]
@@ -1148,8 +1170,21 @@ type MainWindow (args: string array) as this =
         //base.Icon <- WindowIcon(System.IO.Path.Combine("Assets","Icons", "icon.ico"))
         base.Classes.Add("main-window") |> ignore
 
+        let subscriptions state = 
+            let onKeyDown (dispatch) =
+                this.KeyDown.Subscribe(fun e ->
+                    match e.Key with
+                    | Key.Escape ->
+                        dispatch Viewer.Msg.ExitFullScreen
+                    | _ -> ()
+                )
+            [
+                [nameof onKeyDown], onKeyDown
+            ]
+
         Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
         |> Program.withHost this
+        |> Program.withSubscription subscriptions
         |> Program.withConsoleTrace
         |> Program.runWith args
 
