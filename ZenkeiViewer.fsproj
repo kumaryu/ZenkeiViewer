@@ -16,9 +16,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia.Desktop" Version="11.3.8" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.9" />
     <PackageReference Include="Avalonia.FuncUI.Elmish" Version="1.5.2" />
-    <PackageReference Include="Avalonia.Themes.Simple" Version="11.3.8" />
+    <PackageReference Include="Avalonia.Themes.Simple" Version="11.3.9" />
     <PackageReference Include="FSharp.Control.TaskSeq" Version="0.4.0" />
     <PackageReference Include="MetadataExtractor" Version="2.9.0" />
   </ItemGroup>

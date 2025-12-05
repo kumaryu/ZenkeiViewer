@@ -678,25 +678,41 @@ module Viewer =
         equirectangular: bool
     }
 
-    type State = {
-        fullScreen: bool
-        image: Image option
-        zoomOrigin: float option
+    type PerImageState = {
         fov: float<deg>
         distance: float
         yaw: float<deg>
         pitch: float<deg>
         pan: Vector
         useEquirectangular: bool
+        source: Image option
+    }
+
+    module PerImageState =
+        let defaultState = {
+            fov = 60.0<deg>
+            distance = 0.5
+            yaw = 0.0<deg>
+            pitch = 0.0<deg>
+            pan = Vector.Zero
+            useEquirectangular = true
+            source = None
+        }
+
+    type State = {
+        fullScreen: bool
+        image: PerImageState
+        zoomOrigin: float option
     }
 
     type Msg =
     | NextImage
     | PreviousImage
     | SelectImage
-    | OpenImage of Image option
+    | OpenImage of PerImageState option
     | OpenFile of IStorageFile
     | OpenFolder of IStorageFolder
+    | ResetView
     | Zoom of float
     | Zooming of float option
     | ZoomFov of float
@@ -728,7 +744,8 @@ module Viewer =
                 )
                 |> Option.defaultValue false
             strm.Position <- 0
-            return { bitmap=new Bitmap(strm); file=file; folder=folder; equirectangular=useEquirectangular } |> Some
+            let imageSource = { bitmap=new Bitmap(strm); file=file; folder=folder; equirectangular=useEquirectangular } |> Some
+            return { PerImageState.defaultState with useEquirectangular=useEquirectangular; source=imageSource } |> Some
         }
 
     let openImageFileAsync (file: IStorageFile) =
@@ -794,14 +811,14 @@ module Viewer =
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
-            { fullScreen=false; fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, cmd
+            { fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, cmd
         | None ->
-            { fullScreen=false; fov=60.0<deg>; distance=0.5; image=None; yaw=0.0<deg>; pitch=0.0<deg>; pan=Vector.Zero; useEquirectangular=false; zoomOrigin=None }, Cmd.none
+            { fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
         | NextImage ->
-            match state.image with
+            match state.image.source with
             | Some { file=file; folder=Some folder } ->
                 let getNextImage () =
                     task {
@@ -820,7 +837,7 @@ module Viewer =
             | _ ->
                 state, Cmd.none
         | PreviousImage ->
-            match state.image with
+            match state.image.source with
             | Some { file=file; folder=Some folder } ->
                 let getPreviousImage () =
                     task {
@@ -842,38 +859,47 @@ module Viewer =
             let cmd = Cmd.OfTask.perform selectImageAsync host OpenImage
             state, cmd
         | OpenImage value ->
-            state.image |> Option.iter (fun { bitmap=bmp } -> bmp.Dispose())
+            state.image.source |> Option.iter (fun { bitmap=bmp } -> bmp.Dispose())
             match value with
             | None -> state, Cmd.none
-            | Some img -> { state with image = Some img; useEquirectangular = img.equirectangular }, Cmd.none
+            | Some image ->
+                { state with image=image; zoomOrigin=None }, Cmd.none
         | OpenFile file ->
             let cmd = Cmd.OfTask.perform openImageFileAsync file OpenImage
             state, cmd
         | OpenFolder folder ->
             let cmd = Cmd.OfTask.perform openImageFileFromFolderAsync folder OpenImage
             state, cmd
+        | ResetView ->
+            let newImageState =
+                match state.image.source with
+                | Some img ->
+                    { PerImageState.defaultState with useEquirectangular=img.equirectangular; source=Some img }
+                | None ->
+                    PerImageState.defaultState
+            { state with image=newImageState; zoomOrigin=None }, Cmd.none
         | Zooming (Some scale) ->
-            let origin = Option.defaultValue state.distance state.zoomOrigin
+            let origin = Option.defaultValue state.image.distance state.zoomOrigin
             let delta = 1.0 - scale
-            let distanceScale = 1.0 / tan(state.fov / 2.0 |> toRad |> float)
-            let newDist = origin + delta * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
-            { state with distance = newDist; zoomOrigin = Some origin }, Cmd.none
+            let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+            let newDistance = origin + delta * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+            { state with image={ state.image with distance=newDistance }; zoomOrigin=Some origin }, Cmd.none
         | Zooming None ->
             { state with zoomOrigin = None }, Cmd.none
         | Zoom delta ->
-            let distanceScale = 1.0 / tan(state.fov / 2.0 |> toRad |> float)
-            let newDist = state.distance + delta * 0.05 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
-            { state with distance = newDist }, Cmd.none
+            let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+            let newDistance = state.image.distance + delta * 0.05 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+            { state with image={ state.image with distance=newDistance } }, Cmd.none
         | ZoomFov delta ->
-            let newFov = state.fov + delta * 2.5<deg> |> max 5.0<deg> |> min 90.0<deg>
-            let nearPlaneHeight = 2.0 * (state.distance + 1.0) * Math.Tan(state.fov / 2.0 |> toRad |> float)
+            let newFov = state.image.fov + delta * 2.5<deg> |> max 5.0<deg> |> min 90.0<deg>
+            let nearPlaneHeight = 2.0 * (state.image.distance + 1.0) * Math.Tan(state.image.fov / 2.0 |> toRad |> float)
             let newDistance = (nearPlaneHeight / 2.0) / Math.Tan(newFov / 2.0 |> toRad |> float) - 1.0
-            { state with distance = newDistance; fov = newFov }, Cmd.none
+            { state with image={ state.image with distance=newDistance; fov=newFov } }, Cmd.none
         | DragMove (screenDelta , screenSize, renderScaling) ->
-            if state.useEquirectangular then
-                let fov = state.fov |> toRad |> single
+            if state.image.useEquirectangular then
+                let fov = state.image.fov |> toRad |> single
                 let aspect = screenSize.X / screenSize.Y |> single
-                let distance = state.distance |> single
+                let distance = state.image.distance |> single
 
                 let forward = Vector3.UnitY
                 let upward = Vector3.UnitZ
@@ -893,7 +919,7 @@ module Viewer =
                 let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
                 let yawDelta = angleFromTo fromDir toDir1 Vector3.UnitZ |> toDeg
                 let pitchDelta = angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg
-                let yaw = state.yaw + yawDelta
+                let yaw = state.image.yaw + yawDelta
                 let yaw =
                     if yaw > 180.0<deg> then
                         yaw - 360.0<deg>
@@ -901,10 +927,10 @@ module Viewer =
                         yaw + 360.0<deg>
                     else
                         yaw
-                let pitch = clamp -90.0<deg> 90.0<deg> (state.pitch + pitchDelta)
-                { state with yaw = yaw; pitch = pitch }, Cmd.none
+                let pitch = clamp -90.0<deg> 90.0<deg> (state.image.pitch + pitchDelta)
+                { state with image={ state.image with yaw=yaw; pitch=pitch } }, Cmd.none
             else
-                match state.image with
+                match state.image.source with
                 | None ->
                     state, Cmd.none
                 | Some { bitmap=bmp } ->
@@ -912,8 +938,8 @@ module Viewer =
                     let upward = Vector3.UnitY
                     let aspect = screenSize.X / screenSize.Y
                     let imageAspect = (bmp.PixelSize.Width |> float) / (bmp.PixelSize.Height |> float)
-                    let cameraPos = forward * single -state.distance
-                    let scale = 1.0 / (1.0 + state.distance)
+                    let cameraPos = forward * single -state.image.distance
+                    let scale = 1.0 / (1.0 + state.image.distance)
                     let scaleToFit =
                         if imageAspect > aspect then
                             Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
@@ -927,12 +953,12 @@ module Viewer =
                     let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
                     let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
                     let pan = Vector(
-                        state.pan.X + float delta.X |> clamp -1.0 1.0,
-                        state.pan.Y - float delta.Y |> clamp -1.0 1.0
+                        state.image.pan.X + float delta.X |> clamp -1.0 1.0,
+                        state.image.pan.Y - float delta.Y |> clamp -1.0 1.0
                     )
-                    { state with pan = pan }, Cmd.none
+                    { state with image={ state.image with pan=pan } }, Cmd.none
         | SetViewEquirectangular value ->
-            { state with useEquirectangular = value }, Cmd.none
+            { state with image={ state.image with useEquirectangular=value } }, Cmd.none
         | ToggleFullScreen ->
             if state.fullScreen then
                 host.WindowState <- WindowState.Normal
@@ -978,12 +1004,12 @@ module Viewer =
                     ImageViewControl.columnSpan 3
                     ImageViewControl.horizontalAlignment HorizontalAlignment.Stretch
                     ImageViewControl.verticalAlignment VerticalAlignment.Stretch
-                    ImageViewControl.image (state.image |> Option.map _.bitmap)
-                    ImageViewControl.fov state.fov
-                    ImageViewControl.distance state.distance
-                    ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.yaw |> toRad) (state.pitch |> toRad) 0.0)
-                    ImageViewControl.pan state.pan
-                    ImageViewControl.viewEquirectangular state.useEquirectangular
+                    ImageViewControl.image (state.image.source |> Option.map _.bitmap)
+                    ImageViewControl.fov state.image.fov
+                    ImageViewControl.distance state.image.distance
+                    ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) 0.0)
+                    ImageViewControl.pan state.image.pan
+                    ImageViewControl.viewEquirectangular state.image.useEquirectangular
                     ImageViewControl.onPointerWheelChanged 
                         (fun args ->
                             if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
@@ -1099,15 +1125,22 @@ module Viewer =
                             MenuItem.header "View"
                             MenuItem.viewItems [
                                 MenuItem.create [
+                                    MenuItem.header "Reset View"
+                                    MenuItem.hotKey (KeyGesture(Key.R))
+                                    MenuItem.inputGesture (KeyGesture(Key.R))
+                                    MenuItem.onClick (fun _ -> ResetView |> dispatch )
+                                ]
+                                Separator.create []
+                                MenuItem.create [
                                     MenuItem.header "Flat (2D)"
                                     MenuItem.toggleType MenuItemToggleType.Radio
-                                    MenuItem.isChecked (not state.useEquirectangular)
+                                    MenuItem.isChecked (not state.image.useEquirectangular)
                                     MenuItem.onClick (fun _ -> SetViewEquirectangular false |> dispatch)
                                 ]
                                 MenuItem.create [
                                     MenuItem.header "360° Spherical"
                                     MenuItem.toggleType MenuItemToggleType.Radio
-                                    MenuItem.isChecked state.useEquirectangular
+                                    MenuItem.isChecked state.image.useEquirectangular
                                     MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
                                 ]
                                 Separator.create []
