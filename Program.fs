@@ -1188,7 +1188,7 @@ type MainWindow (args: string array) as this =
     inherit HostWindow()
     do
         base.Title <- "Zenkei Viewer"
-        //base.Icon <- WindowIcon(System.IO.Path.Combine("Assets","Icons", "icon.ico"))
+        base.Icon <- WindowIcon(Avalonia.Platform.AssetLoader.Open(Uri("avares://ZenkeiViewer/Assets/ZenkeiViewer.ico")))
         base.Classes.Add("main-window") |> ignore
 
         let subscriptions state = 

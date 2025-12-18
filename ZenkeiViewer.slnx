@@ -1,3 +1,15 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="MakeIcon.fsx" />
+  </Folder>
+  <Folder Name="/Solution Items/AssetSources/">
+    <File Path="AssetSources/ZenkeiViewerIcon_128.png" />
+    <File Path="AssetSources/ZenkeiViewerIcon_16.png" />
+    <File Path="AssetSources/ZenkeiViewerIcon_256.png" />
+    <File Path="AssetSources/ZenkeiViewerIcon_32.png" />
+    <File Path="AssetSources/ZenkeiViewerIcon_48.png" />
+    <File Path="AssetSources/ZenkeiViewerIcon_512.png" />
+    <File Path="AssetSources/ZenkeiViewerIcon_64.png" />
+  </Folder>
   <Project Path="ZenkeiViewer.fsproj" />
 </Solution>
