@@ -16,9 +16,13 @@ open Avalonia.FuncUI.Hosts
 open Avalonia.FuncUI.Elmish
 open System
 open Avalonia.Threading
+open LiteDB
 
 // Allow unsafe code for pointer operations
 #nowarn 9
+
+[<Literal>]
+let settingEntriesLimit = 10000
 
 [<Measure>]
 type deg
@@ -700,10 +704,33 @@ module Viewer =
         }
 
     type State = {
+        db: LiteDatabase
         fullScreen: bool
         image: PerImageState
         zoomOrigin: float option
     }
+
+    module PerImageSettings =
+        let pathToId (path: string) =
+            System.IO.Hashing.XxHash128.Hash(System.Text.Encoding.UTF8.GetBytes(path))
+
+    type PerImageSettings () =
+        let mutable sourcePath = ""
+        [<BsonId>]
+        member val Id: byte array = [||] with get, set
+        member val Updated : System.DateTime = System.DateTime.Now with get, set
+        member val Fov: float<deg> = 60.0<deg> with get, set
+        member val Distance: float = 0.5 with get, set
+        member val Yaw: float<deg> = 0.0<deg> with get, set
+        member val Pitch: float<deg> = 0.0<deg> with get, set
+        member val PanX: float = 0.0 with get, set
+        member val PanY: float = 0.0 with get, set
+        member val UseEquirectangular: bool = true with get, set
+        member this.SourcePath
+            with get () = sourcePath
+            and set value =
+                sourcePath <- value
+                this.Id <- PerImageSettings.pathToId value
 
     type Msg =
     | NextImage
@@ -720,6 +747,7 @@ module Viewer =
     | SetViewEquirectangular of bool
     | ToggleFullScreen
     | ExitFullScreen
+    | Exiting
     | Exit
 
     let openImageFileWithFolderAsync (file: IStorageFile) (folder: IStorageFolder option) =
@@ -808,12 +836,18 @@ module Viewer =
         }
 
     let init (host: HostWindow) args =
+        let settingsDir = System.IO.Path.Join(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData, Environment.SpecialFolderOption.Create), 
+            "ZenkeiViewer")
+        System.IO.Directory.CreateDirectory(settingsDir) |> ignore
+
+        let db = new LiteDatabase(ConnectionString(Filename=System.IO.Path.Join(settingsDir, "ZenkeiViewerSettings.db"), Upgrade=true, AutoRebuild=true, Connection=ConnectionType.Shared))
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
-            { fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, cmd
+            { db=db; fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, cmd
         | None ->
-            { fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, Cmd.none
+            { db=db; fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
@@ -859,11 +893,49 @@ module Viewer =
             let cmd = Cmd.OfTask.perform selectImageAsync host OpenImage
             state, cmd
         | OpenImage value ->
-            state.image.source |> Option.iter (fun { bitmap=bmp } -> bmp.Dispose())
             match value with
             | None -> state, Cmd.none
             | Some image ->
-                { state with image=image; zoomOrigin=None }, Cmd.none
+                let collection = state.db.GetCollection<PerImageSettings>()
+
+                state.image.source
+                |> Option.iter (fun imageSource ->
+                    imageSource.bitmap.Dispose()
+                    let serializable = PerImageSettings(
+                        SourcePath = imageSource.file.Path.ToString(),
+                        Fov = state.image.fov,
+                        Distance = state.image.distance,
+                        Yaw = state.image.yaw,
+                        Pitch = state.image.pitch,
+                        PanX = state.image.pan.X,
+                        PanY = state.image.pan.Y,
+                        UseEquirectangular = state.image.useEquirectangular
+                    )
+                    collection.Upsert(serializable) |> ignore
+                )
+
+                let entry =
+                    image.source
+                    |> Option.bind (fun source ->
+                        source.file.Path.ToString()
+                        |> PerImageSettings.pathToId
+                        |> collection.FindById
+                        |> Option.ofObj
+                    )
+                match entry with
+                | Some e ->
+                    let newImageState = {
+                        fov = e.Fov
+                        distance = e.Distance
+                        yaw = e.Yaw
+                        pitch = e.Pitch
+                        pan = Vector(e.PanX, e.PanY)
+                        useEquirectangular = e.UseEquirectangular
+                        source = image.source
+                    }
+                    { state with image=newImageState; zoomOrigin=None }, Cmd.none
+                | None ->
+                    { state with image=image; zoomOrigin=None }, Cmd.none
         | OpenFile file ->
             let cmd = Cmd.OfTask.perform openImageFileAsync file OpenImage
             state, cmd
@@ -969,6 +1041,35 @@ module Viewer =
             if state.fullScreen then
                 host.WindowState <- WindowState.Normal
             { state with fullScreen = false }, Cmd.none
+        | Exiting ->
+            let collection = state.db.GetCollection<PerImageSettings>()
+
+            state.db.BeginTrans() |> ignore
+            state.image.source
+            |> Option.iter (fun imageSource ->
+                imageSource.bitmap.Dispose()
+                let serializable = PerImageSettings(
+                    SourcePath = imageSource.file.Path.ToString(),
+                    Fov = state.image.fov,
+                    Distance = state.image.distance,
+                    Yaw = state.image.yaw,
+                    Pitch = state.image.pitch,
+                    PanX = state.image.pan.X,
+                    PanY = state.image.pan.Y,
+                    UseEquirectangular = state.image.useEquirectangular
+                )
+                collection.Upsert(serializable) |> ignore
+            )
+
+            collection.Find(LiteDB.Query.All("Updated", LiteDB.Query.Descending), settingEntriesLimit, 1)
+            |> Seq.tryHead
+            |> Option.iter (fun oldest -> collection.DeleteMany(fun e -> e.Updated <= oldest.Updated) |> ignore)
+            state.db.Commit() |> ignore
+
+            state.db.Dispose()
+
+            state, Cmd.none
+
         | Exit ->
             host.Close()
             state, Cmd.none
@@ -1199,8 +1300,13 @@ type MainWindow (args: string array) as this =
                         dispatch Viewer.Msg.ExitFullScreen
                     | _ -> ()
                 )
+            let onClosing (dispatch) =
+                this.Closing.Subscribe(fun e ->
+                    dispatch Viewer.Msg.Exiting
+                )
             [
                 [nameof onKeyDown], onKeyDown
+                [nameof onClosing], onClosing
             ]
 
         Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
