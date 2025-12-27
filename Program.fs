@@ -842,6 +842,9 @@ module Viewer =
         System.IO.Directory.CreateDirectory(settingsDir) |> ignore
 
         let db = new LiteDatabase(ConnectionString(Filename=System.IO.Path.Join(settingsDir, "ZenkeiViewerSettings.db"), Upgrade=true, AutoRebuild=true, Connection=ConnectionType.Shared))
+        let collection = db.GetCollection<PerImageSettings>()
+        collection.EnsureIndex(fun x -> x.Updated) |> ignore
+
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
