@@ -1371,7 +1371,6 @@ type App() =
         | _ -> ()
 
 module Program =
-
     [<EntryPoint>]
     [<STAThread>]
     let main(args: string[]) =
@@ -1381,13 +1380,23 @@ module Program =
             .UseSkia()
             .With(Win32PlatformOptions(
                 RenderingMode = [
-                    //Win32RenderingMode.Wgl
+                    Win32RenderingMode.Wgl
                     Win32RenderingMode.AngleEgl
                 ],
                 WglProfiles = [|
-                    //OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3)
+                    OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3)
                     OpenGL.GlVersion(OpenGL.GlProfileType.OpenGLES, 3, 0)
                 |])
             )
+            .With(X11PlatformOptions(
+                RenderingMode = [
+                    X11RenderingMode.Glx
+                    X11RenderingMode.Egl
+                ],
+                GlProfiles = [|
+                    OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3)
+                    OpenGL.GlVersion(OpenGL.GlProfileType.OpenGLES, 3, 0)
+                |]
+            ))
             .StartWithClassicDesktopLifetime(args)
 
