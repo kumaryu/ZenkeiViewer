@@ -11,7 +11,6 @@ open Avalonia.Input.GestureRecognizers
 open Avalonia.Interactivity
 open Avalonia.Rendering
 open Avalonia.Platform.Storage
-open Avalonia.FuncUI
 open Avalonia.FuncUI.Hosts
 open Avalonia.FuncUI.Elmish
 open System
@@ -732,6 +731,40 @@ module Viewer =
                 sourcePath <- value
                 this.Id <- PerImageSettings.pathToId value
 
+        static member serialize (settings: PerImageSettings) : BsonValue =
+            let doc = BsonDocument()
+            doc["_id"] <- settings.Id
+            doc["Updated"] <- settings.Updated
+            doc["Fov"] <- float settings.Fov
+            doc["Distance"] <- settings.Distance
+            doc["Yaw"] <- float settings.Yaw
+            doc["Pitch"] <- float settings.Pitch
+            doc["PanX"] <- settings.PanX
+            doc["PanY"] <- settings.PanY
+            doc["UseEquirectangular"] <- settings.UseEquirectangular
+            doc["SourcePath"] <- settings.SourcePath
+            doc
+
+        static member deserialize (doc: BsonValue) =
+            let settings = PerImageSettings()
+            settings.Id <- doc["_id"].AsBinary
+            settings.Updated <- doc["Updated"].AsDateTime
+            settings.Fov <- doc["Fov"].AsDouble * 1.0<deg>
+            settings.Distance <- doc["Distance"].AsDouble
+            settings.Yaw <- doc["Yaw"].AsDouble * 1.0<deg>
+            settings.Pitch <- doc["Pitch"].AsDouble * 1.0<deg>
+            settings.PanX <- doc["PanX"].AsDouble
+            settings.PanY <- doc["PanY"].AsDouble
+            settings.UseEquirectangular <- doc["UseEquirectangular"].AsBoolean
+            settings.SourcePath <- doc["SourcePath"].AsString
+            settings
+
+    let liteDBMapper = BsonMapper()
+    liteDBMapper.RegisterType<PerImageSettings>(
+        (fun t -> PerImageSettings.serialize t),
+        (fun d -> PerImageSettings.deserialize d)
+    )
+
     type Msg =
     | NextImage
     | PreviousImage
@@ -841,9 +874,9 @@ module Viewer =
             "ZenkeiViewer")
         System.IO.Directory.CreateDirectory(settingsDir) |> ignore
 
-        let db = new LiteDatabase(ConnectionString(Filename=System.IO.Path.Join(settingsDir, "ZenkeiViewerSettings.db"), Upgrade=true, AutoRebuild=true, Connection=ConnectionType.Shared))
+        let db = new LiteDatabase(ConnectionString(Filename=System.IO.Path.Join(settingsDir, "ZenkeiViewerSettings.db"), Upgrade=true, AutoRebuild=true, Connection=ConnectionType.Shared), liteDBMapper)
         let collection = db.GetCollection<PerImageSettings>()
-        collection.EnsureIndex(fun x -> x.Updated) |> ignore
+        collection.EnsureIndex("Updated") |> ignore
 
         match Array.tryHead args with
         | Some path ->
@@ -918,13 +951,17 @@ module Viewer =
                 )
 
                 let entry =
-                    image.source
-                    |> Option.bind (fun source ->
-                        source.file.Path.ToString()
-                        |> PerImageSettings.pathToId
-                        |> collection.FindById
-                        |> Option.ofObj
-                    )
+                    try
+                        image.source
+                        |> Option.bind (fun source ->
+                            source.file.Path.ToString()
+                            |> PerImageSettings.pathToId
+                            |> collection.FindById
+                            |> Option.ofObj
+                        )
+                    with
+                    | _ ->
+                        None
                 match entry with
                 | Some e ->
                     let newImageState = {
@@ -1066,7 +1103,7 @@ module Viewer =
 
             collection.Find(LiteDB.Query.All("Updated", LiteDB.Query.Descending), settingEntriesLimit, 1)
             |> Seq.tryHead
-            |> Option.iter (fun oldest -> collection.DeleteMany(fun e -> e.Updated <= oldest.Updated) |> ignore)
+            |> Option.iter (fun oldest -> collection.DeleteMany(Query.LTE("Updated", oldest.Updated)) |> ignore)
             state.db.Commit() |> ignore
 
             state.db.Dispose()
@@ -1315,7 +1352,9 @@ type MainWindow (args: string array) as this =
         Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
         |> Program.withHost this
         |> Program.withSubscription subscriptions
+#if DEBUG
         |> Program.withConsoleTrace
+#endif
         |> Program.runWithAvaloniaSyncDispatch args
 
     let mutable inactiveTimer: IDisposable option = None
@@ -1356,7 +1395,7 @@ type App() =
 
     override this.Initialize() =
         this.Styles.Add(Avalonia.Themes.Simple.SimpleTheme())
-        this.Styles.Load "avares://ZenkeiViewer/Styles/Styles.axaml"
+        this.Styles.Add(ZenkeiViewer.ZenkeiViewerStyles())
         //this.RequestedThemeVariant <- Avalonia.Styling.ThemeVariant.Dark
 
     override this.OnFrameworkInitializationCompleted() =
