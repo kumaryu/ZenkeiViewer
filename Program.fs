@@ -16,6 +16,8 @@ open Avalonia.FuncUI.Elmish
 open System
 open Avalonia.Threading
 open LiteDB
+open SkiaSharp
+open Microsoft.FSharp.NativeInterop
 
 // Allow unsafe code for pointer operations
 #nowarn 9
@@ -68,6 +70,12 @@ module Matrix4x4 =
             Matrix4x4.Identity
 
 module GlConsts =
+    let GL_ZERO = 0
+    let GL_ONE = 1
+    let GL_TEXTURE_SWIZZLE_R = 0x8E42
+    let GL_TEXTURE_SWIZZLE_G = 0x8E43
+    let GL_TEXTURE_SWIZZLE_B = 0x8E44
+    let GL_TEXTURE_SWIZZLE_A = 0x8E45
     let GL_TEXTURE_WRAP_S = 0x2802
     let GL_TEXTURE_WRAP_T = 0x2803
     let GL_CLAMP = 0x2900
@@ -75,11 +83,89 @@ module GlConsts =
     let GL_CLAMP_TO_EDGE = 0x812F
     let GL_MAX_TEXTURE_SIZE = 0x0D33
     let GL_LINES = 0x0001
+    let GL_RED = 0x1903
+    let GL_GREEN = 0x1904
+    let GL_BLUE = 0x1905
+    let GL_ALPHA = 0x1906
+    let GL_RGB = 0x1907
+    let GL_RGBA = 0x1908
+    let GL_RGB4 = 0x804F
+    let GL_RGB5 = 0x8050
+    let GL_RGB8 = 0x8051
+    let GL_RGB10 = 0x8052
+    let GL_RGB12 = 0x8053
+    let GL_RGB16 = 0x8054
+    let GL_RGBA2 = 0x8055
+    let GL_RGBA4 = 0x8056
+    let GL_RGB5_A1 = 0x8057
+    let GL_RGBA8 = 0x8058
+    let GL_RGB10_A2 = 0x8059
+    let GL_RGBA12 = 0x805A
+    let GL_RGBA16 = 0x805B
+    let GL_RGBA32F = 0x8814
+    let GL_RGB32F = 0x8815
+    let GL_RGBA16F = 0x881A
+    let GL_RGB16F = 0x881B
+    let GL_RGBA32UI = 0x8D70
+    let GL_RGB32UI = 0x8D71
+    let GL_RGBA16UI = 0x8D76
+    let GL_RGB16UI = 0x8D77
+    let GL_RGBA8UI = 0x8D7C
+    let GL_RGB8UI = 0x8D7D
+    let GL_RGBA32I = 0x8D82
+    let GL_RGB32I = 0x8D83
+    let GL_RGBA16I = 0x8D88
+    let GL_RGB16I = 0x8D89
+    let GL_RGBA8I = 0x8D8E
+    let GL_RGB8I = 0x8D8F
+    let GL_RED_INTEGER = 0x8D94
+    let GL_GREEN_INTEGER = 0x8D95
+    let GL_BLUE_INTEGER = 0x8D96
+    let GL_RGB_INTEGER = 0x8D98
+    let GL_RGBA_INTEGER = 0x8D99
+    let GL_BGR_INTEGER = 0x8D9A
+    let GL_BGRA_INTEGER = 0x8D9B
+    let GL_RG = 0x8227
+    let GL_RG_INTEGER = 0x8228
+    let GL_R8 = 0x8229
+    let GL_R16 = 0x822A
+    let GL_RG8 = 0x822B
+    let GL_RG16 = 0x822C
+    let GL_R16F = 0x822D
+    let GL_R32F = 0x822E
+    let GL_RG16F = 0x822F
+    let GL_RG32F = 0x8230
+    let GL_R8I = 0x8231
+    let GL_R8UI = 0x8232
+    let GL_R16I = 0x8233
+    let GL_R16UI = 0x8234
+    let GL_R32I = 0x8235
+    let GL_R32UI = 0x8236
+    let GL_RG8I = 0x8237
+    let GL_RG8UI = 0x8238
+    let GL_RG16I = 0x8239
+    let GL_RG16UI = 0x823A
+    let GL_RG32I = 0x823B
+    let GL_RG32UI = 0x823C
+    let GL_RGB565 = 0x8D62
+    let GL_HALF_FLOAT = 0x140B
+    let GL_UNSIGNED_BYTE_3_3_2 = 0x8032
+    let GL_UNSIGNED_SHORT_4_4_4_4 = 0x8033
+    let GL_UNSIGNED_SHORT_5_5_5_1 = 0x8034
+    let GL_UNSIGNED_INT_8_8_8_8 = 0x8035
+    let GL_UNSIGNED_INT_10_10_10_2 = 0x8036
+    let GL_UNSIGNED_BYTE_2_3_3_REV = 0x8362
+    let GL_UNSIGNED_SHORT_5_6_5 = 0x8363
+    let GL_UNSIGNED_SHORT_5_6_5_REV = 0x8364
+    let GL_UNSIGNED_SHORT_4_4_4_4_REV = 0x8365
+    let GL_UNSIGNED_SHORT_1_5_5_5_REV = 0x8366
+    let GL_UNSIGNED_INT_8_8_8_8_REV = 0x8367
+    let GL_UNSIGNED_INT_2_10_10_10_REV = 0x8368
 
 type TextureResource =
     | Empty
-    | Staging of NewImage: Bitmap option * OldTexture: int option
-    | Initialized of Texture: int * Image: Bitmap
+    | Staging of NewImage: SKBitmap option * OldTexture: int option
+    | Initialized of Texture: int * Image: SKBitmap
 
 type Resources = 
     { Image: TextureResource; Vertices: int option; Shader: int option }
@@ -90,7 +176,7 @@ type GlUniform4fDelegate = delegate of int * float32 * float32 * float32 * float
 type GlUniformMatrix3fvDelegate = delegate of int * int * bool * voidptr -> unit
 
 module Resources =
-    let updateImage (resources: Resources) (image: Bitmap option) =
+    let updateImage (resources: Resources) (image: SKBitmap option) =
         match image with
         | None ->
             match resources.Image with
@@ -133,7 +219,7 @@ type ImageViewControl() as this =
 
         this.GetPropertyChangedObservable(ImageViewControl.ImageProperty)
         |> Observable.subscribe (fun arg ->
-            resources <- Resources.updateImage resources (arg.NewValue :?> Bitmap option)
+            resources <- Resources.updateImage resources (arg.NewValue :?> SKBitmap option)
             this.RequestNextFrameRendering()
         ) |> ignore
 
@@ -174,39 +260,81 @@ type ImageViewControl() as this =
             | None ->
                 { resources with Image = Empty }, None
             | Some bmp ->
-                let setTextureImage (bitmap: Bitmap) =
-                    let createWriteable (source: Bitmap) =
-                        let newBmp = new WriteableBitmap(source.PixelSize, source.Dpi, Avalonia.Platform.PixelFormat.Rgba8888, Avalonia.Platform.AlphaFormat.Premul)
-                        use locked = newBmp.Lock()
-                        source.CopyPixels(locked, Avalonia.Platform.AlphaFormat.Premul)
-                        newBmp
-                    use tmpBmp = createWriteable bitmap
-
+                let setTextureImage (bitmap: SKBitmap) =
                     let tex = gl.GenTexture()
                     gl.ActiveTexture(OpenGL.GlConsts.GL_TEXTURE0)
                     gl.BindTexture(OpenGL.GlConsts.GL_TEXTURE_2D, tex)
-                    use lockedBmp = tmpBmp.Lock()
+                    let internalFormat, format, datatype, texParams =
+                        match bitmap.ColorType with
+                        | SKColorType.Rgba8888 ->
+                            OpenGL.GlConsts.GL_RGBA8, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_UNSIGNED_BYTE, []
+                        | SKColorType.Rgb888x ->
+                            OpenGL.GlConsts.GL_RGBA8, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_UNSIGNED_BYTE, []
+                        | SKColorType.Bgra8888 ->
+                            OpenGL.GlConsts.GL_RGBA8, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_R, GlConsts.GL_BLUE)]
+                        | SKColorType.Rgb565 ->
+                            GlConsts.GL_RGB565, GlConsts.GL_RGB, GlConsts.GL_UNSIGNED_SHORT_5_6_5, []
+                        | SKColorType.Alpha8 ->
+                            GlConsts.GL_R8, GlConsts.GL_RED, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
+                        | SKColorType.Rg88 ->
+                            GlConsts.GL_RG8, GlConsts.GL_RG, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_ZERO); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
+                        | SKColorType.Argb4444 ->
+                            GlConsts.GL_RGBA4, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_SHORT_4_4_4_4, []
+                        | SKColorType.Rgba1010102
+                        | SKColorType.Rgb101010x ->
+                            GlConsts.GL_RGB10_A2, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_INT_2_10_10_10_REV, []
+                        | SKColorType.Bgra1010102
+                        | SKColorType.Bgr101010x ->
+                            GlConsts.GL_RGB10_A2, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_INT_2_10_10_10_REV, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_R, GlConsts.GL_BLUE)]
+                        | SKColorType.Gray8 ->
+                            GlConsts.GL_R8, GlConsts.GL_RED, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
+                        | SKColorType.RgbaF16
+                        | SKColorType.RgbaF16Clamped ->
+                            GlConsts.GL_RGBA16F, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_HALF_FLOAT, []
+                        | SKColorType.AlphaF16 ->
+                            GlConsts.GL_R16F, GlConsts.GL_RED, GlConsts.GL_HALF_FLOAT, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
+                        | SKColorType.RgF16 ->
+                            GlConsts.GL_RG16F, GlConsts.GL_RG, GlConsts.GL_HALF_FLOAT, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_ZERO); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
+                        | SKColorType.RgbaF32 ->
+                            GlConsts.GL_RGBA32F, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_FLOAT, []
+                        | SKColorType.Alpha16 ->
+                            GlConsts.GL_R16UI, GlConsts.GL_RED_INTEGER, OpenGL.GlConsts.GL_UNSIGNED_SHORT, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
+                        | SKColorType.Rg1616 ->
+                            GlConsts.GL_RG16UI, GlConsts.GL_RG_INTEGER, OpenGL.GlConsts.GL_UNSIGNED_SHORT, []
+                        | SKColorType.Rgba16161616 ->
+                            GlConsts.GL_RGBA16UI, GlConsts.GL_RGBA_INTEGER, OpenGL.GlConsts.GL_UNSIGNED_SHORT, []
+                        |_ ->
+                            failwithf "Unsupported colorType %A" bitmap.ColorType
                     gl.TexImage2D(
                         OpenGL.GlConsts.GL_TEXTURE_2D,
-                        0, 
-                        OpenGL.GlConsts.GL_RGBA,
-                        lockedBmp.Size.Width,
-                        lockedBmp.Size.Height,
-                        0, 
-                        OpenGL.GlConsts.GL_RGBA,
-                        OpenGL.GlConsts.GL_UNSIGNED_BYTE, lockedBmp.Address)
+                        0,
+                        internalFormat,
+                        bitmap.Info.Width,
+                        bitmap.Info.Height,
+                        0,
+                        format,
+                        datatype,
+                        bitmap.GetPixels())
+                    texParams
+                    |> List.iter (fun (pname, param) ->
+                        gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, pname, param)
+                    )
                     gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, OpenGL.GlConsts.GL_TEXTURE_MIN_FILTER, OpenGL.GlConsts.GL_LINEAR)
                     gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, OpenGL.GlConsts.GL_TEXTURE_MAG_FILTER, OpenGL.GlConsts.GL_LINEAR)
                     gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_S, GlConsts.GL_REPEAT)
                     gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_T, GlConsts.GL_CLAMP_TO_EDGE)
                     tex
-                let resizeBitmap (source : Bitmap) =
-                    let mutable maxSize: int = 0
+                let resizeBitmap (bitmap : SKBitmap) =
+                    let mutable maxSize: int = 4096
                     gl.GetIntegerv(GlConsts.GL_MAX_TEXTURE_SIZE, &maxSize)
-                    if source.PixelSize.Width > maxSize || source.PixelSize.Height > maxSize then
-                        source.CreateScaledBitmap(PixelSize(min maxSize source.PixelSize.Width, min maxSize source.PixelSize.Height), BitmapInterpolationMode.HighQuality)
+                    if bitmap.Info.Width > maxSize || bitmap.Info.Height > maxSize then
+                        let newBmp = new SKBitmap(bitmap.Info.WithSize(min maxSize bitmap.Info.Width, min maxSize bitmap.Info.Height))
+                        if bitmap.ScalePixels(newBmp, SKFilterQuality.Medium) then
+                            newBmp
+                        else
+                            bitmap
                     else
-                        source
+                        bitmap
                 let tex =
                     bmp
                     |> resizeBitmap
@@ -337,8 +465,8 @@ type ImageViewControl() as this =
         AvaloniaProperty.Register<ImageViewControl, Quaternion>("Direction", Quaternion.Identity)
     static let panProperty =
         AvaloniaProperty.Register<ImageViewControl, Vector>("Pan", Vector.Zero)
-    static let imageProperty : StyledProperty<Bitmap option> =
-        AvaloniaProperty.Register<ImageViewControl, Bitmap option>("Image", None)
+    static let imageProperty : StyledProperty<SKBitmap option> =
+        AvaloniaProperty.Register<ImageViewControl, SKBitmap option>("Image", None)
     static let viewEquirectangularProperty =
         AvaloniaProperty.Register<ImageViewControl, bool>("ViewEquirectangular", false)
 
@@ -378,8 +506,8 @@ type ImageViewControl() as this =
             |> ignore
 
     member this.Image
-        with get (): Bitmap option = this.GetValue(ImageViewControl.ImageProperty)
-        and set (value: Bitmap option) =
+        with get (): SKBitmap option = this.GetValue(ImageViewControl.ImageProperty)
+        and set (value: SKBitmap option) =
             this.SetValue(ImageViewControl.ImageProperty, value)
             |> ignore
 
@@ -467,7 +595,7 @@ type ImageViewControl() as this =
             else
                 let forward = -Vector3.UnitZ
                 let upward = Vector3.UnitY
-                let imageAspect = (bmp.PixelSize.Width |> float) / (bmp.PixelSize.Height |> float)
+                let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
                 let cameraPos = forward * -distance
                 let scale = 1.0 / (1.0 + this.Distance)
                 let scaleToFit =
@@ -655,8 +783,8 @@ module ImageViewControl =
         static member pan<'t when 't :> ImageViewControl>(value) =
             AttrBuilder<'t>.CreateProperty(ImageViewControl.PanProperty, value, ValueNone)
 
-        static member image<'t when 't :> ImageViewControl>(value: Bitmap option) : IAttr<'t> =
-            AttrBuilder<'t>.CreateProperty<Bitmap option>(ImageViewControl.ImageProperty, value, ValueNone)
+        static member image<'t when 't :> ImageViewControl>(value: SKBitmap option) : IAttr<'t> =
+            AttrBuilder<'t>.CreateProperty<SKBitmap option>(ImageViewControl.ImageProperty, value, ValueNone)
 
         static member viewEquirectangular<'t when 't :> ImageViewControl>(value) =
             AttrBuilder<'t>.CreateProperty<bool>(ImageViewControl.ViewEquirectangularProperty, value, ValueNone)
@@ -675,7 +803,7 @@ module Viewer =
     open Avalonia.Layout
 
     type Image = {
-        bitmap: Bitmap
+        bitmap: SKBitmap
         file: IStorageFile
         folder: IStorageFolder option
         equirectangular: bool
@@ -805,7 +933,8 @@ module Viewer =
                 )
                 |> Option.defaultValue false
             strm.Position <- 0
-            let imageSource = { bitmap=new Bitmap(strm); file=file; folder=folder; equirectangular=useEquirectangular } |> Some
+            let bitmap = SKBitmap.Decode(strm)
+            let imageSource = { bitmap=bitmap; file=file; folder=folder; equirectangular=useEquirectangular } |> Some
             return { PerImageState.defaultState with useEquirectangular=useEquirectangular; source=imageSource } |> Some
         }
 
@@ -1049,7 +1178,7 @@ module Viewer =
                     let forward = -Vector3.UnitZ
                     let upward = Vector3.UnitY
                     let aspect = screenSize.X / screenSize.Y
-                    let imageAspect = (bmp.PixelSize.Width |> float) / (bmp.PixelSize.Height |> float)
+                    let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
                     let cameraPos = forward * single -state.image.distance
                     let scale = 1.0 / (1.0 + state.image.distance)
                     let scaleToFit =
