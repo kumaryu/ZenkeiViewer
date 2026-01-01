@@ -1548,11 +1548,15 @@ module Program =
             .UseSkia()
             .With(Win32PlatformOptions(
                 RenderingMode = [
-                    Win32RenderingMode.Wgl
                     Win32RenderingMode.AngleEgl
+                    Win32RenderingMode.Wgl
                 ],
                 WglProfiles = [|
                     OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3)
+                |])
+            )
+            .With(Win32.AngleOptions(
+                GlProfiles = [|
                     OpenGL.GlVersion(OpenGL.GlProfileType.OpenGLES, 3, 0)
                 |])
             )
