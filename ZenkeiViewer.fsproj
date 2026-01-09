@@ -3,7 +3,8 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <Nullable>enable</Nullable>
+    <!-- Nullable を有効にするとなぜかめちゃくちゃビルドが遅くなるので無効にしておく -->
+    <!-- <Nullable>enable</Nullable> -->
     <ApplicationIcon>Assets\ZenkeiViewer.ico</ApplicationIcon>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Release' And '$(RuntimeIdentifier.StartsWith(`win`))' == 'true'">
@@ -46,6 +47,7 @@
     <PackageReference Include="Avalonia.Desktop" Version="11.3.10" />
     <PackageReference Include="Avalonia.FuncUI.Elmish" Version="1.5.2" />
     <PackageReference Include="Avalonia.Themes.Simple" Version="11.3.10" />
+    <PackageReference Include="Elmish" Version="5.0.2" />
     <PackageReference Include="FSharp.Control.TaskSeq" Version="0.4.0" />
     <PackageReference Include="LiteDB" Version="5.0.21" />
     <PackageReference Include="MetadataExtractor" Version="2.9.0" />

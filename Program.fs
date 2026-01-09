@@ -953,9 +953,14 @@ module Viewer =
                 |> Option.ofObj
                 |> Option.map _.ToLowerInvariant()
                 |> Option.defaultValue ""
-            if ext = ".jpg" || ext = ".png" || ext = ".webp" || ext = ".bmp" || ext = ".avif" then
+            match ext with
+            | ".jpg" | ".jpeg" | ".jpe" | ".jif" | ".jfif"
+            | ".png"
+            | ".webp"
+            | ".bmp"
+            | ".avif" ->
                 Some f
-            else
+            | _ ->
                 None
         | _ -> None
 
@@ -975,7 +980,22 @@ module Viewer =
     let selectImageAsync (host: HostWindow) =
         task {
             let filters = [
-                Platform.Storage.FilePickerFileType("Image Files", Patterns=["*.jpg"; "*.png"; "*.webp"; "*.bmp"; "*.avif"])
+                Platform.Storage.FilePickerFileType("Image Files",
+                    Patterns=[
+                        "*.jpg"; "*.JPG"; "*.jpe"; "*.JPE"; "*.jpeg"; "*.JPEG"; "*.jif"; "*.JIF"; "*.jfif"; "*.JFIF"
+                        "*.png"; "*.PNG"
+                        "*.webp"; "*.WEBP"
+                        "*.bmp"; "*.BMP"
+                        "*.avif"; "*.AVIF"
+                    ],
+                    MimeTypes=[
+                        "image/jpeg"
+                        "image/png"
+                        "image/webp"
+                        "image/bmp"
+                        "image/avif"
+                    ]
+                )
             ]
             let! files =
                 Platform.Storage.FilePickerOpenOptions(AllowMultiple=false, FileTypeFilter=filters)
@@ -1566,7 +1586,7 @@ module Program =
                     X11RenderingMode.Egl
                 ],
                 GlProfiles = [|
-                    OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3)
+                    OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3, isCompatibilityProfile = true)
                     OpenGL.GlVersion(OpenGL.GlProfileType.OpenGLES, 3, 0)
                 |]
             ))
