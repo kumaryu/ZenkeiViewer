@@ -1582,8 +1582,8 @@ module Program =
             )
             .With(X11PlatformOptions(
                 RenderingMode = [
-                    X11RenderingMode.Glx
                     X11RenderingMode.Egl
+                    X11RenderingMode.Glx
                 ],
                 GlProfiles = [|
                     OpenGL.GlVersion(OpenGL.GlProfileType.OpenGL, 3, 3, isCompatibilityProfile = true)
