@@ -1428,7 +1428,7 @@ module Viewer =
                                     MenuItem.onClick (fun _ -> SetViewEquirectangular false |> dispatch)
                                 ]
                                 MenuItem.create [
-                                    MenuItem.header "360° Spherical"
+                                    MenuItem.header "Panorama (360° Spherical)"
                                     MenuItem.toggleType MenuItemToggleType.Radio
                                     MenuItem.isChecked state.image.useEquirectangular
                                     MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
