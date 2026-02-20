@@ -33,6 +33,11 @@ type rad
 let toRad (x: float<deg>) : float<rad> = x * System.Math.PI * 1.0<rad> / 180.0<deg>
 let toDeg (x: float<rad>) : float<deg> = x * 180.0<deg> / System.Math.PI / 1.0<rad>
 
+let signf (value: float<'u>) =
+    if value < 0.0<_> then -1.0
+    elif value > 0.0<_> then 1.0
+    else 0.0
+
 let clamp minVal maxVal value =
     if value < minVal then minVal
     elif value > maxVal then maxVal
@@ -628,10 +633,11 @@ type DragState =
     | Pressed of Pointers: ImmutableHashSet<IPointer> * LastPoint: Point * StartTime: System.DateTime
     | Dragging of Pointers: ImmutableHashSet<IPointer> * LastPoint: Point * StartTime: System.DateTime
 
-type DragMoveEventArgs (event, source: objnull, delta: Avalonia.Vector) =
+type DragMoveEventArgs (event, source: objnull, delta: Avalonia.Vector, keyModifiers: KeyModifiers) =
     inherit RoutedEventArgs (event, source)
 
     member this.Delta = delta
+    member this.KeyModifiers = keyModifiers
 
 type DragMoveGestureRecognizer () =
     inherit GestureRecognizer ()
@@ -735,7 +741,7 @@ type DragMoveGestureRecognizer () =
                 let point = e.GetCurrentPoint(null)
                 let delta = point.Position - lastPoint
                 if delta.X * delta.X + delta.Y * delta.Y > 8.0 * 8.0 then
-                    let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y))
+                    let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y), e.KeyModifiers)
                     match this.Target with
                     | Null -> ()
                     | NonNull target -> target.RaiseEvent args
@@ -750,7 +756,7 @@ type DragMoveGestureRecognizer () =
             if pointers.Contains e.Pointer then
                 let point = e.GetCurrentPoint(null)
                 let delta = point.Position - lastPoint
-                let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y))
+                let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y), e.KeyModifiers)
                 match this.Target with
                 | Null -> ()
                 | NonNull target -> target.RaiseEvent args
@@ -814,6 +820,7 @@ module Viewer =
         distance: float
         yaw: float<deg>
         pitch: float<deg>
+        roll: float<deg>
         pan: Vector
         useEquirectangular: bool
         source: Image option
@@ -825,6 +832,7 @@ module Viewer =
             distance = 0.5
             yaw = 0.0<deg>
             pitch = 0.0<deg>
+            roll = 0.0<deg>
             pan = Vector.Zero
             useEquirectangular = true
             source = None
@@ -850,6 +858,7 @@ module Viewer =
         member val Distance: float = 0.5 with get, set
         member val Yaw: float<deg> = 0.0<deg> with get, set
         member val Pitch: float<deg> = 0.0<deg> with get, set
+        member val Roll: float<deg> = 0.0<deg> with get, set
         member val PanX: float = 0.0 with get, set
         member val PanY: float = 0.0 with get, set
         member val UseEquirectangular: bool = true with get, set
@@ -867,6 +876,7 @@ module Viewer =
             doc["Distance"] <- settings.Distance
             doc["Yaw"] <- float settings.Yaw
             doc["Pitch"] <- float settings.Pitch
+            doc["Roll"] <- float settings.Roll
             doc["PanX"] <- settings.PanX
             doc["PanY"] <- settings.PanY
             doc["UseEquirectangular"] <- settings.UseEquirectangular
@@ -881,6 +891,7 @@ module Viewer =
             settings.Distance <- doc["Distance"].AsDouble
             settings.Yaw <- doc["Yaw"].AsDouble * 1.0<deg>
             settings.Pitch <- doc["Pitch"].AsDouble * 1.0<deg>
+            settings.Roll <- doc["Roll"].AsDouble * 1.0<deg>
             settings.PanX <- doc["PanX"].AsDouble
             settings.PanY <- doc["PanY"].AsDouble
             settings.UseEquirectangular <- doc["UseEquirectangular"].AsBoolean
@@ -904,7 +915,8 @@ module Viewer =
     | Zoom of float
     | Zooming of float option
     | ZoomFov of float
-    | DragMove of delta: Vector * size: Vector * renderScaling: float
+    | Move of delta: Vector * size: Vector
+    | Roll of delta: Vector * size: Vector
     | SetViewEquirectangular of bool
     | ToggleFullScreen
     | ExitFullScreen
@@ -1092,6 +1104,7 @@ module Viewer =
                         Distance = state.image.distance,
                         Yaw = state.image.yaw,
                         Pitch = state.image.pitch,
+                        Roll = state.image.roll,
                         PanX = state.image.pan.X,
                         PanY = state.image.pan.Y,
                         UseEquirectangular = state.image.useEquirectangular
@@ -1118,6 +1131,7 @@ module Viewer =
                         distance = e.Distance
                         yaw = e.Yaw
                         pitch = e.Pitch
+                        roll = e.Roll
                         pan = Vector(e.PanX, e.PanY)
                         useEquirectangular = e.UseEquirectangular
                         source = image.source
@@ -1156,7 +1170,60 @@ module Viewer =
             let nearPlaneHeight = 2.0 * (state.image.distance + 1.0) * Math.Tan(state.image.fov / 2.0 |> toRad |> float)
             let newDistance = (nearPlaneHeight / 2.0) / Math.Tan(newFov / 2.0 |> toRad |> float) - 1.0
             { state with image={ state.image with distance=newDistance; fov=newFov } }, Cmd.none
-        | DragMove (screenDelta , screenSize, renderScaling) ->
+        | Roll (screenDelta , screenSize) ->
+            if state.image.useEquirectangular then
+                let fov = state.image.fov |> toRad |> single
+                let aspect = screenSize.X / screenSize.Y |> single
+                let distance = state.image.distance |> single
+
+                let forward = Vector3.UnitY
+                let upward = Vector3.UnitZ
+                let cameraPos = forward * -distance
+                let worldViewMatrix =
+                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                let viewProjectionMatrix =
+                    Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
+                let projectionViewportMatrix =
+                    Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X |> single, screenSize.Y |> single, 0.0f, 1.0f)
+                let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
+                let fromDir = forward - cameraPos
+                let toDir = Vector3.Transform(
+                    Vector3((screenDelta.X + (screenSize.X / 2.0)) |> single, (screenDelta.Y + (screenSize.Y / 2.0)) |> single, 0.0f), 
+                    viewportWorldMatrix)
+                let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
+                let roll = 
+                    (angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg) + state.image.roll
+                    |> clamp -90.0<deg> 90.0<deg>
+                { state with image={ state.image with roll=roll } }, Cmd.none
+            else
+                match state.image.source with
+                | None ->
+                    state, Cmd.none
+                | Some { bitmap=bmp } ->
+                    let forward = -Vector3.UnitZ
+                    let upward = Vector3.UnitY
+                    let aspect = screenSize.X / screenSize.Y
+                    let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
+                    let cameraPos = forward * single -state.image.distance
+                    let scale = 1.0 / (1.0 + state.image.distance)
+                    let scaleToFit =
+                        if imageAspect > aspect then
+                            Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
+                        else
+                            Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
+                    let worldViewMatrix =
+                        Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
+                        scaleToFit *
+                        Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                    let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
+                    let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
+                    let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
+                    let pan = Vector(
+                        state.image.pan.X + float delta.X |> clamp -1.0 1.0,
+                        state.image.pan.Y - float delta.Y |> clamp -1.0 1.0
+                    )
+                    { state with image={ state.image with pan=pan } }, Cmd.none
+        | Move (screenDelta , screenSize) ->
             if state.image.useEquirectangular then
                 let fov = state.image.fov |> toRad |> single
                 let aspect = screenSize.X / screenSize.Y |> single
@@ -1180,6 +1247,9 @@ module Viewer =
                 let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
                 let yawDelta = angleFromTo fromDir toDir1 Vector3.UnitZ |> toDeg
                 let pitchDelta = angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg
+                let roll =
+                    signf state.image.roll *
+                    (abs state.image.roll - 0.7 * (abs pitchDelta + abs yawDelta) |> max 0.0<deg>)
                 let yaw = state.image.yaw + yawDelta
                 let yaw =
                     if yaw > 180.0<deg> then
@@ -1189,7 +1259,8 @@ module Viewer =
                     else
                         yaw
                 let pitch = clamp -90.0<deg> 90.0<deg> (state.image.pitch + pitchDelta)
-                { state with image={ state.image with yaw=yaw; pitch=pitch } }, Cmd.none
+                let roll = clamp -90.0<deg> 90.0<deg> roll
+                { state with image={ state.image with yaw=yaw; pitch=pitch; roll=roll } }, Cmd.none
             else
                 match state.image.source with
                 | None ->
@@ -1243,6 +1314,7 @@ module Viewer =
                     Distance = state.image.distance,
                     Yaw = state.image.yaw,
                     Pitch = state.image.pitch,
+                    Roll = state.image.roll,
                     PanX = state.image.pan.X,
                     PanY = state.image.pan.Y,
                     UseEquirectangular = state.image.useEquirectangular
@@ -1297,7 +1369,7 @@ module Viewer =
                     ImageViewControl.image (state.image.source |> Option.map _.bitmap)
                     ImageViewControl.fov state.image.fov
                     ImageViewControl.distance state.image.distance
-                    ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) 0.0)
+                    ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) (state.image.roll |> toRad))
                     ImageViewControl.pan state.image.pan
                     ImageViewControl.viewEquirectangular state.image.useEquirectangular
                     ImageViewControl.onPointerWheelChanged 
@@ -1312,13 +1384,20 @@ module Viewer =
                         match args.Source with
                         | :? ImageViewControl as ivc ->
                             args.Handled <- true
-                            (
-                                Vector(args.Delta.X, args.Delta.Y),
-                                Vector(ivc.Bounds.Width, ivc.Bounds.Height),
-                                host.RenderScaling
-                            )
-                            |> DragMove
-                            |> dispatch
+                            if args.KeyModifiers.HasFlag KeyModifiers.Shift then
+                                (
+                                    Vector(args.Delta.X, args.Delta.Y),
+                                    Vector(ivc.Bounds.Width, ivc.Bounds.Height)
+                                )
+                                |> Roll
+                                |> dispatch
+                            else
+                                (
+                                    Vector(args.Delta.X, args.Delta.Y),
+                                    Vector(ivc.Bounds.Width, ivc.Bounds.Height)
+                                )
+                                |> Move
+                                |> dispatch
                         |_ -> ()
                     )
                     ImageViewControl.onPinch (fun args ->
@@ -1340,14 +1419,19 @@ module Viewer =
                                         20.0
                                     else
                                         10.0
-
                                 let move v =
                                     (
                                         v,
-                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height),
-                                        host.RenderScaling
+                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height)
                                     )
-                                    |> DragMove
+                                    |> Move
+                                    |> dispatch
+                                let roll v =
+                                    (
+                                        v,
+                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height)
+                                    )
+                                    |> Roll
                                     |> dispatch
                                 match args.Key with
                                 | Key.Left ->
@@ -1362,6 +1446,12 @@ module Viewer =
                                 | Key.Down ->
                                     args.Handled <- true
                                     move (Vector(0.0, -k))
+                                | Key.Q ->
+                                    args.Handled <- true
+                                    roll (Vector(0.0, k))
+                                | Key.E ->
+                                    args.Handled <- true
+                                    roll (Vector(0.0, -k))
                                 | _ -> ()
                         | _ -> ()
                     )
