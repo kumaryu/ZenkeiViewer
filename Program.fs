@@ -5,7 +5,6 @@ open Elmish
 open Avalonia
 open Avalonia.Controls
 open Avalonia.Controls.ApplicationLifetimes
-open Avalonia.Media.Imaging
 open Avalonia.Input
 open Avalonia.Input.GestureRecognizers
 open Avalonia.Interactivity
@@ -17,7 +16,6 @@ open System
 open Avalonia.Threading
 open LiteDB
 open SkiaSharp
-open Microsoft.FSharp.NativeInterop
 
 // Allow unsafe code for pointer operations
 #nowarn 9
@@ -766,6 +764,244 @@ type DragMoveGestureRecognizer () =
                 // 他のポインタータイプがリリースされた場合は無視
                 e.Handled <- false
 
+[<CustomEquality; CustomComparison>]
+type PressedPointer =
+    {
+        Pointer: IPointer
+        StartTime: int64
+        StartPoint: Point
+        LastPoint: Point
+    }
+    override this.Equals(obj) =
+        match obj with
+        | :? PressedPointer as x ->
+            x.Pointer.Id = this.Pointer.Id
+        | _ ->
+            false
+
+    override this.GetHashCode (): int = 
+        this.Pointer.Id.GetHashCode()
+
+    interface System.IComparable with
+        member this.CompareTo(obj) =
+            match obj with
+            | :? PressedPointer as x ->
+                compare this.Pointer.Id x.Pointer.Id
+            | _ ->
+                invalidArg "obj" "Cannot compare PressedPointer with other types."
+
+module PressedPointer =
+    let create pointer startPoint =
+        let timestamp = System.Diagnostics.Stopwatch.GetTimestamp()
+        { Pointer = pointer; StartTime = timestamp; StartPoint = startPoint; LastPoint = startPoint }
+type PointerState =
+    {
+        Pointer: IPointer
+        StartTime: int64
+        StartPoint: Point
+        LastPoint: Point
+    }
+
+type PinchState =
+    | NotStarted of Pointers: Map<int, PointerState>
+    | DraggingWithRotation of Pointers: Map<int, PointerState>
+    | DraggingWithScaling of Pointers: Map<int, PointerState>
+
+// 回転と拡縮が排他操作な PinchGestureRecognizer
+type ExclusivePinchGestureRecognizer () =
+    inherit GestureRecognizer ()
+
+    let mutable state = NotStarted Map.empty
+
+    let onRotate (eventTarget:IInputElement) current oldest =
+        let originalAngle = (atan2 (current.StartPoint.Y - oldest.StartPoint.Y) (current.StartPoint.X - oldest.StartPoint.X)) * 1.0<rad> |> toDeg
+        let angle = (atan2 (current.LastPoint.Y - oldest.LastPoint.Y) (current.LastPoint.X - oldest.LastPoint.X)) * 1.0<rad> |> toDeg
+        let angleDelta = angle - originalAngle
+        let angleDelta =
+            if angleDelta > 180.0<deg> then
+                angleDelta - 360.0<deg>
+            elif angleDelta < -180.0<deg> then
+                angleDelta + 360.0<deg>
+            else
+                angleDelta
+
+        let scaleOrigin = oldest.StartPoint + current.StartPoint / 2.0
+        let args = PinchEventArgs(1.0, scaleOrigin, angle / 1.0<deg>, angleDelta / 1.0<deg>)
+        eventTarget.RaiseEvent args
+
+    let onScale (eventTarget:IInputElement) current oldest =
+        let originalDistance = Vector.Distance(Vector(current.StartPoint.X, current.StartPoint.Y), Vector(oldest.StartPoint.X, oldest.StartPoint.Y))
+        let distance = Vector.Distance(Vector(current.LastPoint.X, current.LastPoint.Y), Vector(oldest.LastPoint.X, oldest.LastPoint.Y))
+        let distanceScale = distance / originalDistance
+        let angle = (atan2 (current.LastPoint.Y - oldest.LastPoint.Y) (current.LastPoint.X - oldest.LastPoint.X)) * 1.0<rad> |> toDeg
+
+        let scaleOrigin = oldest.StartPoint + current.StartPoint / 2.0
+        let args = PinchEventArgs(distanceScale, scaleOrigin, angle / 1.0<deg>, 0.0)
+        eventTarget.RaiseEvent args
+
+    let pointerReleased (eventTarget:IInputElement | null) pointer =
+        match state with
+        | NotStarted pointers ->
+            // ドラッグが開始されていない場合はドラッグ状態を更新
+            if Map.containsKey pointer pointers then
+                state <- Map.remove pointer pointers |> NotStarted
+                true
+            else
+                false
+        | DraggingWithRotation pointers ->
+            if Map.containsKey pointer pointers then
+                // ドラッグ中のポインタータイプがリリースされた場合
+                let pointers = Map.remove pointer pointers
+                if Map.isEmpty pointers then
+                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
+                    state <- NotStarted pointers
+                    match eventTarget with
+                    | Null -> ()
+                    | NonNull target ->
+                        let args = PinchEndedEventArgs()
+                        target.RaiseEvent args
+                else
+                    // 他のポインターが残っている場合はドラッグ状態を更新
+                    state <- DraggingWithRotation pointers
+                true
+            else
+                // 他のポインタータイプがリリースされた場合は無視
+                false
+        | DraggingWithScaling pointers ->
+            if Map.containsKey pointer pointers then
+                // ドラッグ中のポインタータイプがリリースされた場合
+                let pointers = Map.remove pointer pointers
+                if Map.isEmpty pointers then
+                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
+                    state <- NotStarted pointers
+                    match eventTarget with
+                    | Null -> ()
+                    | NonNull target ->
+                        let args = PinchEndedEventArgs()
+                        target.RaiseEvent args
+                else
+                    // 他のポインターが残っている場合はドラッグ状態を更新
+                    state <- DraggingWithScaling pointers
+                true
+            else
+                // 他のポインタータイプがリリースされた場合は無視
+                false
+
+    override this.PointerPressed (e: PointerPressedEventArgs): unit = 
+        match e.Pointer.Type with
+        | PointerType.Touch ->
+            let pos = e.GetCurrentPoint(null).Position
+            let pointerState = { Pointer=e.Pointer; StartTime = System.Diagnostics.Stopwatch.GetTimestamp(); StartPoint = pos; LastPoint = pos }
+            match state with
+            | NotStarted pointers -> 
+                let pointers = Map.add e.Pointer.Id pointerState pointers
+                if Map.count pointers >= 2 then
+                    for p in Map.values pointers do
+                        this.Capture(p.Pointer)
+                    e.PreventGestureRecognition()
+                state <- NotStarted pointers
+            | DraggingWithScaling pointers ->
+                this.Capture(e.Pointer)
+                let pointers = Map.add e.Pointer.Id pointerState pointers
+                state <- DraggingWithScaling pointers
+                e.PreventGestureRecognition()
+            | DraggingWithRotation pointers ->
+                this.Capture(e.Pointer)
+                state <- DraggingWithRotation pointers
+                e.PreventGestureRecognition()
+        | _ ->
+            // 他のポインタータイプは無視
+            ()
+
+    override this.PointerReleased (e: PointerReleasedEventArgs): unit = 
+        let handled = pointerReleased this.Target e.Pointer.Id
+        e.Handled <- handled
+
+    override this.PointerCaptureLost (pointer: IPointer): unit = 
+        pointerReleased this.Target pointer.Id |> ignore
+
+    override this.PointerMoved (e: PointerEventArgs): unit = 
+        match e.Pointer.Type with
+        | PointerType.Touch ->
+            match state with
+            | NotStarted pointers ->
+                if Map.containsKey e.Pointer.Id pointers && Map.count pointers >= 2 then
+                    let pos = e.GetCurrentPoint(null).Position
+                    let current = { Map.find e.Pointer.Id pointers with LastPoint = pos }
+                    let pointers = Map.add e.Pointer.Id current pointers
+                    let oldest =
+                        pointers
+                        |> Map.remove e.Pointer.Id
+                        |> Map.values
+                        |> Seq.sortBy (fun p -> p.StartTime)
+                        |> Seq.head
+                    let originalDistance = Vector.Distance(Vector(current.StartPoint.X, current.StartPoint.Y), Vector(oldest.StartPoint.X, oldest.StartPoint.Y))
+                    let distance = Vector.Distance(Vector(current.LastPoint.X, current.LastPoint.Y), Vector(oldest.LastPoint.X, oldest.LastPoint.Y))
+                    let distanceScale = distance / originalDistance
+                    let originalAngle = (atan2 (current.StartPoint.Y - oldest.StartPoint.Y) (current.StartPoint.X - oldest.StartPoint.X)) * 1.0<rad> |> toDeg
+                    let angle = (atan2 (current.LastPoint.Y - oldest.LastPoint.Y) (current.LastPoint.X - oldest.LastPoint.X)) * 1.0<rad> |> toDeg
+                    let angleDelta = angle - originalAngle
+                    if abs (distanceScale - 1.0) > 0.1 then
+                        state <- DraggingWithScaling pointers
+                        for p in Map.values pointers do
+                            this.Capture(p.Pointer)
+                    elif abs angleDelta > 5.0<deg> then
+                        state <- DraggingWithRotation pointers
+                        for p in Map.values pointers do
+                            this.Capture(p.Pointer)
+                    else
+                        state <- NotStarted pointers
+                    e.Handled <- true
+                    e.PreventGestureRecognition()
+                else
+                    e.Handled <- false
+            | DraggingWithRotation pointers ->
+                if Map.containsKey e.Pointer.Id pointers && Map.count pointers >= 2 then
+                    let pos = e.GetCurrentPoint(null).Position
+                    let current = { Map.find e.Pointer.Id pointers with LastPoint = pos }
+                    let pointers = Map.add e.Pointer.Id current pointers
+                    let oldest =
+                        pointers
+                        |> Map.remove e.Pointer.Id
+                        |> Map.values
+                        |> Seq.sortBy (fun p -> p.StartTime)
+                        |> Seq.head
+                    match this.Target with
+                    | Null -> ()
+                    | NonNull target ->
+                        onRotate target current oldest
+
+                    state <- DraggingWithRotation pointers
+                    e.Handled <- true
+                    e.PreventGestureRecognition()
+                else
+                    // 他のポインタータイプがリリースされた場合は無視
+                    e.Handled <- false
+            | DraggingWithScaling pointers ->
+                if Map.containsKey e.Pointer.Id pointers && Map.count pointers >= 2 then
+                    let pos = e.GetCurrentPoint(null).Position
+                    let current = { Map.find e.Pointer.Id pointers with LastPoint = pos }
+                    let pointers = Map.add e.Pointer.Id current pointers
+                    let oldest =
+                        pointers
+                        |> Map.remove e.Pointer.Id
+                        |> Map.values
+                        |> Seq.sortBy (fun p -> p.StartTime)
+                        |> Seq.head
+                    match this.Target with
+                    | Null -> ()
+                    | NonNull target ->
+                        onScale target current oldest
+
+                    state <- DraggingWithScaling pointers
+                    e.Handled <- true
+                    e.PreventGestureRecognition()
+                else
+                    // 他のポインタータイプがリリースされた場合は無視
+                    e.Handled <- false
+        | _ ->
+            // 他のポインタータイプは無視
+            ()
 
 [<AutoOpen>]
 module ImageViewControl =
@@ -838,11 +1074,21 @@ module Viewer =
             source = None
         }
 
+    type PinchState = {
+        originalScale: float option
+        originalAngle: float<deg> option
+    }
+
+    module PinchState =
+        let none = { originalScale = None; originalAngle = None }
+        let scale originalScale = { none with originalScale = Some originalScale }
+        let rotate originalAngle = { none with originalAngle = Some originalAngle }
+
     type State = {
         db: LiteDatabase
         fullScreen: bool
         image: PerImageState
-        zoomOrigin: float option
+        pinchState: PinchState
     }
 
     module PerImageSettings =
@@ -913,10 +1159,12 @@ module Viewer =
     | OpenFolder of IStorageFolder
     | ResetView
     | Zoom of float
-    | Zooming of float option
+    | Pinch of scale: float * angle: float<deg>
+    | PinchEnd
     | ZoomFov of float
     | Move of delta: Vector * size: Vector
     | Roll of delta: Vector * size: Vector
+    | RollAngle of delta: float<deg>
     | SetViewEquirectangular of bool
     | ToggleFullScreen
     | ExitFullScreen
@@ -1042,9 +1290,9 @@ module Viewer =
         match Array.tryHead args with
         | Some path ->
             let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
-            { db=db; fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, cmd
+            { db=db; fullScreen=false; image=PerImageState.defaultState; pinchState=PinchState.none }, cmd
         | None ->
-            { db=db; fullScreen=false; image=PerImageState.defaultState; zoomOrigin=None }, Cmd.none
+            { db=db; fullScreen=false; image=PerImageState.defaultState; pinchState=PinchState.none }, Cmd.none
 
     let update (host: HostWindow) (msg: Msg) (state: State) =
         match msg with
@@ -1136,9 +1384,9 @@ module Viewer =
                         useEquirectangular = e.UseEquirectangular
                         source = image.source
                     }
-                    { state with image=newImageState; zoomOrigin=None }, Cmd.none
+                    { state with image=newImageState; pinchState=PinchState.none }, Cmd.none
                 | None ->
-                    { state with image=image; zoomOrigin=None }, Cmd.none
+                    { state with image=image; pinchState=PinchState.none }, Cmd.none
         | OpenFile file ->
             let cmd = Cmd.OfTask.perform openImageFileAsync file OpenImage
             state, cmd
@@ -1152,15 +1400,35 @@ module Viewer =
                     { PerImageState.defaultState with useEquirectangular=img.equirectangular; source=Some img }
                 | None ->
                     PerImageState.defaultState
-            { state with image=newImageState; zoomOrigin=None }, Cmd.none
-        | Zooming (Some scale) ->
-            let origin = Option.defaultValue state.image.distance state.zoomOrigin
-            let delta = 1.0 - scale
-            let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
-            let newDistance = origin + delta * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
-            { state with image={ state.image with distance=newDistance }; zoomOrigin=Some origin }, Cmd.none
-        | Zooming None ->
-            { state with zoomOrigin = None }, Cmd.none
+            { state with image=newImageState; pinchState=PinchState.none }, Cmd.none
+        | Pinch (scale, angle) ->
+            match state.pinchState with
+            | { originalScale=None; originalAngle=None } ->
+                if abs (scale - 1.0) > 0.1 then
+                    let originalScale = Option.defaultValue state.image.distance state.pinchState.originalScale
+                    let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+                    let newDistance = originalScale + (1.0 - scale) * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+                    { state with image={ state.image with distance=newDistance }; pinchState=PinchState.scale originalScale }, Cmd.none
+                elif abs angle > 5.0<deg> then
+                    let originalAngle = Option.defaultValue state.image.roll state.pinchState.originalAngle
+                    let newRoll = angle + originalAngle |> clamp -90.0<deg> 90.0<deg>
+                    { state with image={ state.image with roll=newRoll }; pinchState=PinchState.rotate originalAngle }, Cmd.none
+                else
+                    state, Cmd.none
+            | { originalScale=Some originalScale; originalAngle=_ } ->
+                let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+                let newDistance = originalScale + (1.0 - scale) * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+                { state with image={ state.image with distance=newDistance }; pinchState=PinchState.scale originalScale }, Cmd.none
+            | { originalScale=_; originalAngle=Some originalAngle } ->
+                let newRoll = angle + originalAngle |> clamp -90.0<deg> 90.0<deg>
+                { state with image={ state.image with roll=newRoll }; pinchState=PinchState.rotate originalAngle }, Cmd.none
+        | PinchEnd ->
+            { state with pinchState=PinchState.none }, Cmd.none
+        | RollAngle angleDelta ->
+            let roll = 
+                angleDelta + state.image.roll
+                |> clamp -90.0<deg> 90.0<deg>
+            { state with image={ state.image with roll=roll } }, Cmd.none
         | Zoom delta ->
             let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
             let newDistance = state.image.distance + delta * 0.05 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
@@ -1357,7 +1625,7 @@ module Viewer =
                 ImageViewControl.create [
                     ImageViewControl.init (fun ivc ->
                         ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
-                        ivc.GestureRecognizers.Add(PinchGestureRecognizer())
+                        ivc.GestureRecognizers.Add(ExclusivePinchGestureRecognizer())
                     )
                     ImageViewControl.focusable true
                     ImageViewControl.row 0
@@ -1402,13 +1670,11 @@ module Viewer =
                     )
                     ImageViewControl.onPinch (fun args ->
                         args.Handled <- true
-                        Zooming (Some args.Scale)
-                        |> dispatch
+                        Pinch (args.Scale, args.AngleDelta * 1.0<deg>) |> dispatch
                     )
                     ImageViewControl.onPinchEnded (fun args ->
                         args.Handled <- true
-                        Zooming None
-                        |> dispatch
+                        PinchEnd |> dispatch
                     )
                     ImageViewControl.onKeyDown (fun args ->
                         match args.Source with
