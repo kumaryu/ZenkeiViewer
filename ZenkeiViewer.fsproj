@@ -3,8 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
-    <!-- Nullable を有効にするとなぜかめちゃくちゃビルドが遅くなるので無効にしておく -->
-    <!-- <Nullable>enable</Nullable> -->
+    <Nullable>enable</Nullable>
     <ApplicationIcon>Assets\ZenkeiViewer.ico</ApplicationIcon>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)'=='Release' And '$(RuntimeIdentifier.StartsWith(`win`))' == 'true'">
@@ -38,6 +37,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="Common.fs" />
+    <Compile Include="DragMoveGestureRecognizer.fs" />
+    <Compile Include="ExclusivePinchGestureRecognizer.fs" />
+    <Compile Include="ImageViewControl.fs" />
     <AvaloniaXaml Include="ZenkeiViewerStyles.xaml" />
     <Compile Include="ZenkeiViewerStyles.xaml.fs" />
     <Compile Include="Program.fs" />

@@ -1,4 +1,4 @@
-namespace ZenkeiViewer
+namespace ZenkeiViewerXaml
 open Avalonia.Styling
 open Avalonia.Markup.Xaml
 

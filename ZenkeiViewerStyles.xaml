@@ -1,4 +1,4 @@
-<Styles xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="ZenkeiViewer.ZenkeiViewerStyles">
+<Styles xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="ZenkeiViewerXaml.ZenkeiViewerStyles">
     <Style Selector="Menu">
       <Setter Property="Background" Value="{DynamicResource ThemeControlMidBrush}" />
       <Setter Property="Opacity" Value="0.8"/>

@@ -1,14 +1,12 @@
+module ZenkeiViewer
+
 open System.Numerics
-open System.Collections.Immutable
 open FSharp.Control
 open Elmish
 open Avalonia
 open Avalonia.Controls
 open Avalonia.Controls.ApplicationLifetimes
 open Avalonia.Input
-open Avalonia.Input.GestureRecognizers
-open Avalonia.Interactivity
-open Avalonia.Rendering
 open Avalonia.Platform.Storage
 open Avalonia.FuncUI.Hosts
 open Avalonia.FuncUI.Elmish
@@ -16,1563 +14,315 @@ open System
 open Avalonia.Threading
 open LiteDB
 open SkiaSharp
-
-// Allow unsafe code for pointer operations
-#nowarn 9
+open Common
+open ImageViewControl
+open DragMoveGestureRecognizer
+open ExclusivePinchGestureRecognizer
+open Avalonia.FuncUI.DSL
+open Avalonia.Layout
 
 [<Literal>]
 let settingEntriesLimit = 10000
 
-[<Measure>]
-type deg
-[<Measure>]
-type rad
+type Image = {
+    bitmap: SKBitmap
+    file: IStorageFile
+    folder: IStorageFolder option
+    equirectangular: bool
+}
 
-let toRad (x: float<deg>) : float<rad> = x * System.Math.PI * 1.0<rad> / 180.0<deg>
-let toDeg (x: float<rad>) : float<deg> = x * 180.0<deg> / System.Math.PI / 1.0<rad>
+type PerImageState = {
+    fov: float<deg>
+    distance: float
+    yaw: float<deg>
+    pitch: float<deg>
+    roll: float<deg>
+    pan: Vector
+    useEquirectangular: bool
+    source: Image option
+}
 
-let signf (value: float<'u>) =
-    if value < 0.0<_> then -1.0
-    elif value > 0.0<_> then 1.0
-    else 0.0
+module PerImageState =
+    let defaultState = {
+        fov = 60.0<deg>
+        distance = 0.5
+        yaw = 0.0<deg>
+        pitch = 0.0<deg>
+        roll = 0.0<deg>
+        pan = Vector.Zero
+        useEquirectangular = true
+        source = None
+    }
 
-let clamp minVal maxVal value =
-    if value < minVal then minVal
-    elif value > maxVal then maxVal
-    else value
+type PinchState = {
+    originalScale: float option
+    originalAngle: float<deg> option
+}
 
-let angleFromTo fromDir toDir axis =
-    let cross = Vector3.Cross(
-        fromDir |> Vector3.Normalize,
-        toDir |> Vector3.Normalize
-    )
-    let len = cross.Length()
-    if len < 1e-6f then
-        0.0<rad>
-    else
-        let angle = asin len
-        let sign = if Vector3.Dot(cross, axis) < 0.0f then -1.0f else 1.0f
-        (angle * sign |> float) * 1.0<rad>
+module PinchState =
+    let none = { originalScale = None; originalAngle = None }
+    let scale originalScale = { none with originalScale = Some originalScale }
+    let rotate originalAngle = { none with originalAngle = Some originalAngle }
 
-module Quaternion =
-    let fromYawPitchRoll yaw pitch roll =
-        Quaternion.Concatenate(
-            Quaternion.Concatenate(
-                Quaternion.CreateFromAxisAngle(Vector3.UnitZ, float32 yaw),
-                Quaternion.CreateFromAxisAngle(Vector3.UnitX, float32 pitch)
-            ),
-            Quaternion.CreateFromAxisAngle(Vector3.UnitY, float32 roll)
-        )
+type State = {
+    db: LiteDatabase
+    fullScreen: bool
+    image: PerImageState
+    pinchState: PinchState
+}
 
-module Matrix4x4 =
-    let invert (mtx: Matrix4x4) =
-        let success, inv = Matrix4x4.Invert(mtx)
-        if success then
-            inv
-        else
-            Matrix4x4.Identity
+module PerImageSettings =
+    let pathToId (path: string) =
+        System.IO.Hashing.XxHash128.Hash(System.Text.Encoding.UTF8.GetBytes(path))
 
-module GlConsts =
-    let GL_ZERO = 0
-    let GL_ONE = 1
-    let GL_TEXTURE_SWIZZLE_R = 0x8E42
-    let GL_TEXTURE_SWIZZLE_G = 0x8E43
-    let GL_TEXTURE_SWIZZLE_B = 0x8E44
-    let GL_TEXTURE_SWIZZLE_A = 0x8E45
-    let GL_TEXTURE_WRAP_S = 0x2802
-    let GL_TEXTURE_WRAP_T = 0x2803
-    let GL_CLAMP = 0x2900
-    let GL_REPEAT = 0x2901
-    let GL_CLAMP_TO_EDGE = 0x812F
-    let GL_MAX_TEXTURE_SIZE = 0x0D33
-    let GL_LINES = 0x0001
-    let GL_RED = 0x1903
-    let GL_GREEN = 0x1904
-    let GL_BLUE = 0x1905
-    let GL_ALPHA = 0x1906
-    let GL_RGB = 0x1907
-    let GL_RGBA = 0x1908
-    let GL_RGB4 = 0x804F
-    let GL_RGB5 = 0x8050
-    let GL_RGB8 = 0x8051
-    let GL_RGB10 = 0x8052
-    let GL_RGB12 = 0x8053
-    let GL_RGB16 = 0x8054
-    let GL_RGBA2 = 0x8055
-    let GL_RGBA4 = 0x8056
-    let GL_RGB5_A1 = 0x8057
-    let GL_RGBA8 = 0x8058
-    let GL_RGB10_A2 = 0x8059
-    let GL_RGBA12 = 0x805A
-    let GL_RGBA16 = 0x805B
-    let GL_RGBA32F = 0x8814
-    let GL_RGB32F = 0x8815
-    let GL_RGBA16F = 0x881A
-    let GL_RGB16F = 0x881B
-    let GL_RGBA32UI = 0x8D70
-    let GL_RGB32UI = 0x8D71
-    let GL_RGBA16UI = 0x8D76
-    let GL_RGB16UI = 0x8D77
-    let GL_RGBA8UI = 0x8D7C
-    let GL_RGB8UI = 0x8D7D
-    let GL_RGBA32I = 0x8D82
-    let GL_RGB32I = 0x8D83
-    let GL_RGBA16I = 0x8D88
-    let GL_RGB16I = 0x8D89
-    let GL_RGBA8I = 0x8D8E
-    let GL_RGB8I = 0x8D8F
-    let GL_RED_INTEGER = 0x8D94
-    let GL_GREEN_INTEGER = 0x8D95
-    let GL_BLUE_INTEGER = 0x8D96
-    let GL_RGB_INTEGER = 0x8D98
-    let GL_RGBA_INTEGER = 0x8D99
-    let GL_BGR_INTEGER = 0x8D9A
-    let GL_BGRA_INTEGER = 0x8D9B
-    let GL_RG = 0x8227
-    let GL_RG_INTEGER = 0x8228
-    let GL_R8 = 0x8229
-    let GL_R16 = 0x822A
-    let GL_RG8 = 0x822B
-    let GL_RG16 = 0x822C
-    let GL_R16F = 0x822D
-    let GL_R32F = 0x822E
-    let GL_RG16F = 0x822F
-    let GL_RG32F = 0x8230
-    let GL_R8I = 0x8231
-    let GL_R8UI = 0x8232
-    let GL_R16I = 0x8233
-    let GL_R16UI = 0x8234
-    let GL_R32I = 0x8235
-    let GL_R32UI = 0x8236
-    let GL_RG8I = 0x8237
-    let GL_RG8UI = 0x8238
-    let GL_RG16I = 0x8239
-    let GL_RG16UI = 0x823A
-    let GL_RG32I = 0x823B
-    let GL_RG32UI = 0x823C
-    let GL_RGB565 = 0x8D62
-    let GL_HALF_FLOAT = 0x140B
-    let GL_UNSIGNED_BYTE_3_3_2 = 0x8032
-    let GL_UNSIGNED_SHORT_4_4_4_4 = 0x8033
-    let GL_UNSIGNED_SHORT_5_5_5_1 = 0x8034
-    let GL_UNSIGNED_INT_8_8_8_8 = 0x8035
-    let GL_UNSIGNED_INT_10_10_10_2 = 0x8036
-    let GL_UNSIGNED_BYTE_2_3_3_REV = 0x8362
-    let GL_UNSIGNED_SHORT_5_6_5 = 0x8363
-    let GL_UNSIGNED_SHORT_5_6_5_REV = 0x8364
-    let GL_UNSIGNED_SHORT_4_4_4_4_REV = 0x8365
-    let GL_UNSIGNED_SHORT_1_5_5_5_REV = 0x8366
-    let GL_UNSIGNED_INT_8_8_8_8_REV = 0x8367
-    let GL_UNSIGNED_INT_2_10_10_10_REV = 0x8368
+type PerImageSettings () =
+    let mutable sourcePath = ""
+    [<BsonId>]
+    member val Id: byte array = [||] with get, set
+    member val Updated : System.DateTime = System.DateTime.Now with get, set
+    member val Fov: float<deg> = 60.0<deg> with get, set
+    member val Distance: float = 0.5 with get, set
+    member val Yaw: float<deg> = 0.0<deg> with get, set
+    member val Pitch: float<deg> = 0.0<deg> with get, set
+    member val Roll: float<deg> = 0.0<deg> with get, set
+    member val PanX: float = 0.0 with get, set
+    member val PanY: float = 0.0 with get, set
+    member val UseEquirectangular: bool = true with get, set
+    member this.SourcePath
+        with get () = sourcePath
+        and set value =
+            sourcePath <- value
+            this.Id <- PerImageSettings.pathToId value
 
-type TextureResource =
-    | Empty
-    | Staging of NewImage: SKBitmap option * OldTexture: int option
-    | Initialized of Texture: int * Image: SKBitmap
+    static member serialize (settings: PerImageSettings) : BsonValue =
+        let doc = BsonDocument()
+        doc["_id"] <- settings.Id
+        doc["Updated"] <- settings.Updated
+        doc["Fov"] <- float settings.Fov
+        doc["Distance"] <- settings.Distance
+        doc["Yaw"] <- float settings.Yaw
+        doc["Pitch"] <- float settings.Pitch
+        doc["Roll"] <- float settings.Roll
+        doc["PanX"] <- settings.PanX
+        doc["PanY"] <- settings.PanY
+        doc["UseEquirectangular"] <- settings.UseEquirectangular
+        doc["SourcePath"] <- settings.SourcePath
+        doc
 
-type Resources = 
-    { Image: TextureResource; Vertices: int option; Shader: int option }
+    static member deserialize (doc: BsonValue) =
+        let settings = PerImageSettings()
+        settings.Id <- doc["_id"].AsBinary
+        settings.Updated <- doc["Updated"].AsDateTime
+        settings.Fov <- doc["Fov"].AsDouble * 1.0<deg>
+        settings.Distance <- doc["Distance"].AsDouble
+        settings.Yaw <- doc["Yaw"].AsDouble * 1.0<deg>
+        settings.Pitch <- doc["Pitch"].AsDouble * 1.0<deg>
+        settings.Roll <- doc["Roll"].AsDouble * 1.0<deg>
+        settings.PanX <- doc["PanX"].AsDouble
+        settings.PanY <- doc["PanY"].AsDouble
+        settings.UseEquirectangular <- doc["UseEquirectangular"].AsBoolean
+        settings.SourcePath <- doc["SourcePath"].AsString
+        settings
 
-type GlUniform1iDelegate = delegate of int * int -> unit
-type GlUniform3fDelegate = delegate of int * float32 * float32 * float32 -> unit
-type GlUniform4fDelegate = delegate of int * float32 * float32 * float32 * float32 -> unit
-type GlUniformMatrix3fvDelegate = delegate of int * int * bool * voidptr -> unit
+let liteDBMapper = BsonMapper()
+liteDBMapper.RegisterType<PerImageSettings>(
+    (fun t -> PerImageSettings.serialize t),
+    (fun d -> PerImageSettings.deserialize d)
+)
 
-module Resources =
-    let updateImage (resources: Resources) (image: SKBitmap option) =
-        match image with
-        | None ->
-            match resources.Image with
-            | Empty -> { resources with Image = Empty }
-            | Staging (_, oldTexture) -> { resources with Image = Staging (None, oldTexture) }
-            | Initialized (texture, _) -> { resources with Image = Staging (None, Some texture) }
-        | Some _ ->
-            match resources.Image with
-            | Empty -> { resources with Image = Staging (image, None) }
-            | Staging (_, oldTexture) -> { resources with Image = Staging (image, oldTexture) }
-            | Initialized (texture, _) -> { resources with Image = Staging (image, Some texture) }
+type Msg =
+| NextImage
+| PreviousImage
+| SelectImage
+| OpenImage of PerImageState option
+| OpenFile of IStorageFile
+| OpenFolder of IStorageFolder
+| ResetView
+| Zoom of float
+| Pinch of scale: float * angle: float<deg>
+| PinchEnd
+| ZoomFov of float
+| Move of delta: Vector * size: Vector
+| Roll of delta: Vector * size: Vector
+| RollAngle of delta: float<deg>
+| SetViewEquirectangular of bool
+| ToggleFullScreen
+| ExitFullScreen
+| Exiting
+| Exit
 
-type ImageViewControl() as this =
-    inherit OpenGL.Controls.OpenGlControlBase()
+let openImageFileWithFolderAsync (file: IStorageFile) (folder: IStorageFolder option) =
+    task {
+        use! strm = file.OpenReadAsync()
+        let metadata = MetadataExtractor.ImageMetadataReader.ReadMetadata(strm)
+        let useEquirectangular =
+            metadata
+            |> Seq.tryPick (fun dir ->
+                match dir with
+                | :? MetadataExtractor.Formats.Xmp.XmpDirectory as xmpDir ->
+                    let props = xmpDir.GetXmpProperties()
+                    match (props.TryGetValue "GPano:ProjectionType", props.TryGetValue "GPano:UsePanoramaViewer") with
+                    | ((true, v1), (true, v2)) ->
+                        (String.Equals(v1, "equirectangular", StringComparison.InvariantCultureIgnoreCase) && XmpCore.XmpUtils.ConvertToBoolean(v2)) |> Some
+                    | ((true, v1), (false, _)) ->
+                        String.Equals(v1, "equirectangular", StringComparison.InvariantCultureIgnoreCase) |> Some
+                    | ((false, _), _) ->
+                        Some false
+                | _ ->
+                    None
+            )
+            |> Option.defaultValue false
+        strm.Position <- 0
+        let bitmap = SKBitmap.Decode(strm)
+        let imageSource = { bitmap=bitmap; file=file; folder=folder; equirectangular=useEquirectangular } |> Some
+        return { PerImageState.defaultState with useEquirectangular=useEquirectangular; source=imageSource } |> Some
+    }
 
-    let mutable resources = { Image = Empty; Vertices = None; Shader = None }
-    let mutable glUniform1i: GlUniform1iDelegate option = None
-    let mutable glUniform3f: GlUniform3fDelegate option = None
-    let mutable glUniform4f: GlUniform4fDelegate option = None
-    let mutable glUniformMatrix3fv: GlUniformMatrix3fvDelegate option = None
+let openImageFileAsync (file: IStorageFile) =
+    task {
+        let! folder = file.GetParentAsync()
+        let folder = Option.ofObj folder
+        return! openImageFileWithFolderAsync file folder
+    }
 
-    do
-        let requestRendering observable =
-            observable
-            |> Observable.subscribe (fun _ ->
-                this.RequestNextFrameRendering()
-            ) |> ignore
-
-        this.GetPropertyChangedObservable(ImageViewControl.FovProperty)
-        |> requestRendering
-
-        this.GetPropertyChangedObservable(ImageViewControl.DistanceProperty)
-        |> requestRendering
-
-        this.GetPropertyChangedObservable(ImageViewControl.DirectionProperty)
-        |> requestRendering
-
-        this.GetPropertyChangedObservable(ImageViewControl.PanProperty)
-        |> requestRendering
-
-        this.GetPropertyChangedObservable(ImageViewControl.ImageProperty)
-        |> Observable.subscribe (fun arg ->
-            resources <- Resources.updateImage resources (arg.NewValue :?> SKBitmap option)
-            this.RequestNextFrameRendering()
-        ) |> ignore
-
-        this.GetPropertyChangedObservable(ImageViewControl.ViewEquirectangularProperty)
-        |> requestRendering
-
-    let checkError (gl: OpenGL.GlInterface) =
-        let err = gl.GetError()
-        match err with
-        | OpenGL.GlConsts.GL_NO_ERROR ->
-            ()
-        | OpenGL.GlConsts.GL_INVALID_ENUM ->
-            printfn "OpenGL error: GL_INVALID_ENUM"
-        | OpenGL.GlConsts.GL_INVALID_VALUE ->
-            printfn "OpenGL error: GL_INVALID_VALUE"
-        | OpenGL.GlConsts.GL_INVALID_OPERATION ->
-            printfn "OpenGL error: GL_INVALID_OPERATION"
-        | OpenGL.GlConsts.GL_STACK_OVERFLOW ->
-            printfn "OpenGL error: GL_STACK_OVERFLOW"
-        | OpenGL.GlConsts.GL_STACK_UNDERFLOW ->
-            printfn "OpenGL error: GL_STACK_UNDERFLOW"
-        | OpenGL.GlConsts.GL_OUT_OF_MEMORY ->
-            printfn "OpenGL error: GL_OUT_OF_MEMORY"
-        | OpenGL.GlConsts.GL_INVALID_FRAMEBUFFER_OPERATION ->
-            printfn "OpenGL error: GL_INVALID_FRAMEBUFFER_OPERATION"
-        | OpenGL.GlConsts.GL_CONTEXT_LOST ->
-            printfn "OpenGL error: GL_CONTEXT_LOST"
+let isImageFile (item: IStorageItem) =
+    match item with
+    | :? IStorageFile as f ->
+        let ext =
+            System.IO.Path.GetExtension(f.Name)
+            |> Option.ofObj
+            |> Option.map _.ToLowerInvariant()
+            |> Option.defaultValue ""
+        match ext with
+        | ".jpg" | ".jpeg" | ".jpe" | ".jif" | ".jfif"
+        | ".png"
+        | ".webp"
+        | ".bmp"
+        | ".avif" ->
+            Some f
         | _ ->
-            printfn "OpenGL error: %d" err
+            None
+    | _ -> None
 
-    let setupImageResource (gl: OpenGL.GlInterface) resources =
-        match resources.Image with
-        | Empty ->
-            resources, None
-        | Staging (newImage, oldTexture) ->
-            oldTexture |> Option.iter gl.DeleteTexture
-            match newImage with
-            | None ->
-                { resources with Image = Empty }, None
-            | Some bmp ->
-                let setTextureImage (bitmap: SKBitmap) =
-                    let tex = gl.GenTexture()
-                    gl.ActiveTexture(OpenGL.GlConsts.GL_TEXTURE0)
-                    gl.BindTexture(OpenGL.GlConsts.GL_TEXTURE_2D, tex)
-                    let internalFormat, format, datatype, texParams =
-                        match bitmap.ColorType with
-                        | SKColorType.Rgba8888 ->
-                            OpenGL.GlConsts.GL_RGBA8, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_UNSIGNED_BYTE, []
-                        | SKColorType.Rgb888x ->
-                            OpenGL.GlConsts.GL_RGBA8, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_UNSIGNED_BYTE, []
-                        | SKColorType.Bgra8888 ->
-                            OpenGL.GlConsts.GL_RGBA8, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_R, GlConsts.GL_BLUE)]
-                        | SKColorType.Rgb565 ->
-                            GlConsts.GL_RGB565, GlConsts.GL_RGB, GlConsts.GL_UNSIGNED_SHORT_5_6_5, []
-                        | SKColorType.Alpha8 ->
-                            GlConsts.GL_R8, GlConsts.GL_RED, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
-                        | SKColorType.Rg88 ->
-                            GlConsts.GL_RG8, GlConsts.GL_RG, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_ZERO); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
-                        | SKColorType.Argb4444 ->
-                            GlConsts.GL_RGBA4, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_SHORT_4_4_4_4, []
-                        | SKColorType.Rgba1010102
-                        | SKColorType.Rgb101010x ->
-                            GlConsts.GL_RGB10_A2, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_INT_2_10_10_10_REV, []
-                        | SKColorType.Bgra1010102
-                        | SKColorType.Bgr101010x ->
-                            GlConsts.GL_RGB10_A2, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_UNSIGNED_INT_2_10_10_10_REV, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_R, GlConsts.GL_BLUE)]
-                        | SKColorType.Gray8 ->
-                            GlConsts.GL_R8, GlConsts.GL_RED, OpenGL.GlConsts.GL_UNSIGNED_BYTE, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
-                        | SKColorType.RgbaF16
-                        | SKColorType.RgbaF16Clamped ->
-                            GlConsts.GL_RGBA16F, OpenGL.GlConsts.GL_RGBA, GlConsts.GL_HALF_FLOAT, []
-                        | SKColorType.AlphaF16 ->
-                            GlConsts.GL_R16F, GlConsts.GL_RED, GlConsts.GL_HALF_FLOAT, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
-                        | SKColorType.RgF16 ->
-                            GlConsts.GL_RG16F, GlConsts.GL_RG, GlConsts.GL_HALF_FLOAT, [(GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_ZERO); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
-                        | SKColorType.RgbaF32 ->
-                            GlConsts.GL_RGBA32F, OpenGL.GlConsts.GL_RGBA, OpenGL.GlConsts.GL_FLOAT, []
-                        | SKColorType.Alpha16 ->
-                            GlConsts.GL_R16UI, GlConsts.GL_RED_INTEGER, OpenGL.GlConsts.GL_UNSIGNED_SHORT, [(GlConsts.GL_TEXTURE_SWIZZLE_G, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_B, GlConsts.GL_RED); (GlConsts.GL_TEXTURE_SWIZZLE_A, GlConsts.GL_ONE)]
-                        | SKColorType.Rg1616 ->
-                            GlConsts.GL_RG16UI, GlConsts.GL_RG_INTEGER, OpenGL.GlConsts.GL_UNSIGNED_SHORT, []
-                        | SKColorType.Rgba16161616 ->
-                            GlConsts.GL_RGBA16UI, GlConsts.GL_RGBA_INTEGER, OpenGL.GlConsts.GL_UNSIGNED_SHORT, []
-                        |_ ->
-                            failwithf "Unsupported colorType %A" bitmap.ColorType
-                    gl.TexImage2D(
-                        OpenGL.GlConsts.GL_TEXTURE_2D,
-                        0,
-                        internalFormat,
-                        bitmap.Info.Width,
-                        bitmap.Info.Height,
-                        0,
-                        format,
-                        datatype,
-                        bitmap.GetPixels())
-                    texParams
-                    |> List.iter (fun (pname, param) ->
-                        gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, pname, param)
-                    )
-                    gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, OpenGL.GlConsts.GL_TEXTURE_MIN_FILTER, OpenGL.GlConsts.GL_LINEAR)
-                    gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, OpenGL.GlConsts.GL_TEXTURE_MAG_FILTER, OpenGL.GlConsts.GL_LINEAR)
-                    gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_S, GlConsts.GL_REPEAT)
-                    gl.TexParameteri(OpenGL.GlConsts.GL_TEXTURE_2D, GlConsts.GL_TEXTURE_WRAP_T, GlConsts.GL_CLAMP_TO_EDGE)
-                    tex
-                let resizeBitmap (bitmap : SKBitmap) =
-                    let mutable maxSize: int = 4096
-                    gl.GetIntegerv(GlConsts.GL_MAX_TEXTURE_SIZE, &maxSize)
-                    if bitmap.Info.Width > maxSize || bitmap.Info.Height > maxSize then
-                        let newBmp = new SKBitmap(bitmap.Info.WithSize(min maxSize bitmap.Info.Width, min maxSize bitmap.Info.Height))
-                        if bitmap.ScalePixels(newBmp, SKFilterQuality.Medium) then
-                            newBmp
-                        else
-                            bitmap
-                    else
-                        bitmap
-                let tex =
-                    bmp
-                    |> resizeBitmap
-                    |> setTextureImage
-                { resources with Image = Initialized (tex, bmp) }, Some (tex, bmp)
-        | Initialized (tex, bmp) ->
-            resources, Some (tex, bmp)
+let getImagesFromFolderAsync (folder: IStorageFolder) =
+    folder.GetItemsAsync()
+    |> TaskSeq.choose isImageFile
 
-    let setupVertexBuffer (gl: OpenGL.GlInterface) resources =
-        match resources.Vertices with
-        | Some buf ->
-            resources, buf
+let openImageFileFromFolderAsync (folder: IStorageFolder) =
+    task {
+        match! getImagesFromFolderAsync folder |> TaskSeq.tryHead with
+        | Some file ->
+            return! openImageFileWithFolderAsync file (Some folder)
         | None ->
-            let vertexArray = gl.GenVertexArray()
-            gl.BindVertexArray(vertexArray)
-            let buf = gl.GenBuffer()
-            gl.BindBuffer(OpenGL.GlConsts.GL_ARRAY_BUFFER, buf)
-            use vertices = fixed [|
-                -1.0f; -1.0f;
-                 3.0f; -1.0f;
-                -1.0f;  3.0f;
-            |]
-            gl.BufferData(OpenGL.GlConsts.GL_ARRAY_BUFFER, (6 * sizeof<float32>) |> nativeint, NativeInterop.NativePtr.toNativeInt vertices, OpenGL.GlConsts.GL_STATIC_DRAW)
-            gl.VertexAttribPointer(0, 2, OpenGL.GlConsts.GL_FLOAT, 0, 0, 0)
-            gl.EnableVertexAttribArray(0)
-            { resources with Vertices = Some vertexArray }, vertexArray
+            return None
+    }
 
-    let shaderSource (glVersion:OpenGL.GlVersion) =
-        let vshader = """
-        in vec2 position;
-        out vec2 v_uv;
-        void main() {
-            gl_Position = vec4(position, 0.0, 1.0);
-            v_uv = position;
-        }
-        """
-        let fshader = """
-        in vec2 v_uv;
-        uniform bool u_useEquirectangular;
-        uniform sampler2D u_tex;
-        uniform mat4 u_projectionWorldMatrix;
-        uniform mat4 u_textureMatrix;
-        uniform vec3 u_cameraWorldPos;
-        out vec4 fragColor;
-        const float PI = 3.14159265358979323846;
-        const float SphereRadius = 1.0;
-        const vec3 SpherePos = vec3(0.0, 0.0, 0.0);
-        void main() {
-            if (u_useEquirectangular) {
-                vec4 viewPos = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
-                vec3 viewVec = viewPos.xyz / viewPos.w - u_cameraWorldPos;
-                vec3 q = u_cameraWorldPos - SpherePos;
-                float r = SphereRadius;
-                float a = dot(viewVec, viewVec);
-                float b = 2.0 * dot(viewVec, q);
-                float c = dot(q, q) - (r * r);
-                float d = b * b - 4.0 * a * c;
-
-                if (d<0.0) {
-                    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                }
-                else {
-                    float t = (-b + sqrt(d)) / (2.0 * a);
-                    vec3 hitPos = viewVec * t + q;
-                    vec4 hitVec = vec4((hitPos - SpherePos), 0.0) * u_textureMatrix;
-                    vec2 uv0 = vec2(atan(hitVec.x, hitVec.y), asin(hitVec.z));
-                    vec2 uv = vec2((uv0.x + PI) / 2.0, (PI / 2.0) - uv0.y) / PI;
-                    fragColor = texture(u_tex, uv);
-                }
-            }
-            else {
-                vec4 viewPos0 = vec4(v_uv, 0.0, 1.0) * u_projectionWorldMatrix;
-                vec3 viewVec = vec3(viewPos0.xy, viewPos0.z / viewPos0.w);
-                vec4 uv0 = vec4(viewVec.xy, 0.0, 1.0) * u_textureMatrix;
-                vec2 uv = vec2((uv0.x + 1.0) / 2.0, (1.0 - uv0.y) / 2.0);
-                if (uv.x<0.0 || 1.0<uv.x || uv.y<0.0 || 1.0<uv.y) {
-                    fragColor = vec4(0.0, 0.0, 0.0, 1.0);
-                }
-                else {
-                    fragColor = texture(u_tex, uv);
-                }
-            }
-        }
-        """
-        match glVersion.Type with
-        | OpenGL.GlProfileType.OpenGL ->
-            let prefix = """#version 330 core
-            """
-            (prefix + vshader), (prefix + fshader)
-        | OpenGL.GlProfileType.OpenGLES ->
-            let prefix = """#version 300 es
-            precision mediump float;
-            """
-            (prefix + vshader), (prefix + fshader)
-        | _ -> failwith "Unsupported OpenGL version"
-
-    let setupShader (gl: OpenGL.GlInterface) resources =
-        match resources.Shader with
-        | Some buf ->
-            resources, buf
+let selectImageAsync (host: HostWindow) =
+    task {
+        let filters = [
+            Platform.Storage.FilePickerFileType("Image Files",
+                Patterns=[
+                    "*.jpg"; "*.JPG"; "*.jpe"; "*.JPE"; "*.jpeg"; "*.JPEG"; "*.jif"; "*.JIF"; "*.jfif"; "*.JFIF"
+                    "*.png"; "*.PNG"
+                    "*.webp"; "*.WEBP"
+                    "*.bmp"; "*.BMP"
+                    "*.avif"; "*.AVIF"
+                ],
+                MimeTypes=[
+                    "image/jpeg"
+                    "image/png"
+                    "image/webp"
+                    "image/bmp"
+                    "image/avif"
+                ]
+            )
+        ]
+        let! files =
+            Platform.Storage.FilePickerOpenOptions(AllowMultiple=false, FileTypeFilter=filters)
+            |> host.StorageProvider.OpenFilePickerAsync
+        match Seq.tryHead files |> Option.bind isImageFile with
+        | Some file ->
+            return! openImageFileAsync file
         | None ->
-            let vshaderSrc, fshaderSrc = shaderSource gl.ContextInfo.Version
-            let vshader = gl.CreateShader(OpenGL.GlConsts.GL_VERTEX_SHADER)
-            let err = gl.CompileShaderAndGetError(vshader, vshaderSrc)
-            printfn "Vertex shader compile error: %s" err
+            return None
+    }
 
-            let fshader = gl.CreateShader(OpenGL.GlConsts.GL_FRAGMENT_SHADER)
-            let err = gl.CompileShaderAndGetError(fshader, fshaderSrc)
-            printfn "Fragment shader compile error: %s" err
-
-            let program = gl.CreateProgram()
-            gl.AttachShader(program, vshader)
-            gl.AttachShader(program, fshader)
-            gl.BindAttribLocationString(vshader, 0, "position")
-            let err = gl.LinkProgramAndGetError(program)
-            printfn "Shader program link error: %s" err
-
-            gl.DeleteShader(vshader)
-            gl.DeleteShader(fshader)
-
-            { resources with Shader = Some program }, program
-
-    static let fovProperty : StyledProperty<float<deg>> =
-        AvaloniaProperty.Register<ImageViewControl, float<deg>>("Fov", 60.0<deg>)
-    static let distanceProperty : StyledProperty<float> =
-        AvaloniaProperty.Register<ImageViewControl, float>("Distance", 0.0)
-    static let directionProperty : StyledProperty<Quaternion> =
-        AvaloniaProperty.Register<ImageViewControl, Quaternion>("Direction", Quaternion.Identity)
-    static let panProperty =
-        AvaloniaProperty.Register<ImageViewControl, Vector>("Pan", Vector.Zero)
-    static let imageProperty : StyledProperty<SKBitmap option> =
-        AvaloniaProperty.Register<ImageViewControl, SKBitmap option>("Image", None)
-    static let viewEquirectangularProperty =
-        AvaloniaProperty.Register<ImageViewControl, bool>("ViewEquirectangular", false)
-
-    interface ICustomHitTest with
-        member this.HitTest(point: Point) =
-            this.Bounds.Contains(point)
-
-    static member FovProperty = fovProperty
-    static member DistanceProperty = distanceProperty
-    static member DirectionProperty = directionProperty
-    static member PanProperty = panProperty
-    static member ImageProperty = imageProperty
-    static member ViewEquirectangularProperty = viewEquirectangularProperty
-
-    member this.Fov
-        with get () = this.GetValue(ImageViewControl.FovProperty)
-        and set (value) =
-            this.SetValue(ImageViewControl.FovProperty, value)
-            |> ignore
-
-    member this.Distance
-        with get () = this.GetValue(ImageViewControl.DistanceProperty)
-        and set (value) =
-            this.SetValue(ImageViewControl.DistanceProperty, value)
-            |> ignore
-
-    member this.Direction
-        with get () = this.GetValue(ImageViewControl.DirectionProperty)
-        and set (value) =
-            this.SetValue(ImageViewControl.DirectionProperty, value)
-            |> ignore
-
-    member this.Pan
-        with get () = this.GetValue(ImageViewControl.PanProperty)
-        and set (value) =
-            this.SetValue(ImageViewControl.PanProperty, value)
-            |> ignore
-
-    member this.Image
-        with get (): SKBitmap option = this.GetValue(ImageViewControl.ImageProperty)
-        and set (value: SKBitmap option) =
-            this.SetValue(ImageViewControl.ImageProperty, value)
-            |> ignore
-
-    member this.ViewEquirectangular
-        with get () = this.GetValue(ImageViewControl.ViewEquirectangularProperty)
-        and set (value) =
-            this.SetValue(ImageViewControl.ViewEquirectangularProperty, value)
-            |> ignore
-
-    override this.OnOpenGlInit (gl) = 
-        printfn "OpenGL initialized with version: %s" (gl.ContextInfo.Version.ToString())
-        glUniform1i <- System.Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer<GlUniform1iDelegate>(gl.GetProcAddress("glUniform1i")) |> Some
-        glUniform3f <- System.Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer<GlUniform3fDelegate>(gl.GetProcAddress("glUniform3f")) |> Some
-        glUniform4f <- System.Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer<GlUniform4fDelegate>(gl.GetProcAddress("glUniform4f")) |> Some
-        glUniformMatrix3fv <- System.Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer<GlUniformMatrix3fvDelegate>(gl.GetProcAddress("glUniformMatrix3fv")) |> Some
-        base.OnOpenGlInit(gl)
-
-    override this.OnOpenGlRender (gl, fb) = 
-        let newResources, tex = setupImageResource gl resources
-        let newResources, vertices = setupVertexBuffer gl newResources
-        let newResources, shader = setupShader gl newResources
-        resources <- newResources
-
-        let renderScaling = (nonNull this.VisualRoot).RenderScaling
-        let sz = PixelSize(max 1 (this.Bounds.Width * renderScaling |> int), max 1 (this.Bounds.Height * renderScaling |> int))
-        gl.Viewport(0, 0, sz.Width, sz.Height)
-
-        gl.BindFramebuffer(OpenGL.GlConsts.GL_FRAMEBUFFER, fb)
-        checkError gl
-        gl.ClearColor(0.5f, 0.5f, 0.5f, 1.0f)
-        checkError gl
-        gl.ClearDepth(1.0f)
-        checkError gl
-        gl.ClearStencil(0)
-        checkError gl
-        gl.Clear(OpenGL.GlConsts.GL_COLOR_BUFFER_BIT ||| OpenGL.GlConsts.GL_DEPTH_BUFFER_BIT ||| OpenGL.GlConsts.GL_STENCIL_BUFFER_BIT)
-        checkError gl
-
-        match tex with
+let openImageByPath (host: HostWindow) (path: string) =
+    task {
+        let! item = host.StorageProvider.TryGetFileFromPathAsync path
+        match item |> Option.ofObj |> Option.bind isImageFile with
         | None ->
-            ()
-        | Some (tex, bmp)  ->
-            gl.ActiveTexture(OpenGL.GlConsts.GL_TEXTURE0)
-            checkError gl
-            gl.BindTexture(OpenGL.GlConsts.GL_TEXTURE_2D, tex)
-            checkError gl
-
-            gl.UseProgram(shader)
-            checkError gl
-            glUniform1i.Value.Invoke(gl.GetUniformLocationString(shader, "u_tex"), 0) // Set texture unit 0
-            checkError gl
-
-            glUniform1i.Value.Invoke(gl.GetUniformLocationString(shader, "u_useEquirectangular"), if this.ViewEquirectangular then 1 else 0)
-            checkError gl
-            
-            let fov = this.Fov |> toRad |> single
-            let aspect = this.Bounds.Width / this.Bounds.Height
-            let distance = this.Distance |> single
-
-            let uniformMatrix4 name (mtx: Matrix4x4) =
-                use m = fixed [|
-                    mtx.M11; mtx.M12; mtx.M13; mtx.M14;
-                    mtx.M21; mtx.M22; mtx.M23; mtx.M24;
-                    mtx.M31; mtx.M32; mtx.M33; mtx.M34;
-                    mtx.M41; mtx.M42; mtx.M43; mtx.M44;
-                |]
-                gl.UniformMatrix4fv(gl.GetUniformLocationString(shader, name), 1, true, NativeInterop.NativePtr.toVoidPtr m)
-                checkError gl
-
-            if this.ViewEquirectangular then
-                let forward = Vector3.UnitY
-                let upward = Vector3.UnitZ
-                let cameraPos = forward * -distance
-                let worldViewMatrix = Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                let viewProjectionMatrix = Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect |> single, 1.0f + distance, 10.0f + distance)
-                let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
-                glUniform3f.Value.Invoke(gl.GetUniformLocationString(shader,"u_cameraWorldPos"), cameraPos.X, cameraPos.Y, cameraPos.Z)
-                checkError gl
-                uniformMatrix4 "u_projectionWorldMatrix" projectionWorldMatrix
-
-                this.Direction
-                |> Quaternion.Inverse // Direction には視点の向きを設定しているが、回転行列としては対象物を回転させる必要があるため逆元を使う
-                |> Matrix4x4.CreateFromQuaternion
-                |> uniformMatrix4 "u_textureMatrix"
-            else
-                let forward = -Vector3.UnitZ
-                let upward = Vector3.UnitY
-                let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
-                let cameraPos = forward * -distance
-                let scale = 1.0 / (1.0 + this.Distance)
-                let scaleToFit =
-                    if imageAspect > aspect then
-                        Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
-                    else
-                        Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
-                let worldViewMatrix =
-                    Matrix4x4.CreateTranslation(this.Pan.X |> single, this.Pan.Y |> single, 1.0f) *
-                    Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
-                    scaleToFit *
-                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
-                let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
-                glUniform3f.Value.Invoke(gl.GetUniformLocationString(shader,"u_cameraWorldPos"), cameraPos.X, cameraPos.Y, cameraPos.Z)
-                checkError gl
-                uniformMatrix4 "u_projectionWorldMatrix" projectionWorldMatrix
-
-                Matrix4x4.Identity
-                |> uniformMatrix4 "u_textureMatrix"
-
-            gl.BindVertexArray(vertices)
-            checkError gl
-
-            gl.DrawArrays(OpenGL.GlConsts.GL_TRIANGLES, 0, 6)
-            checkError gl
-
-type DragState =
-    | NotStarted
-    | Pressed of Pointers: ImmutableHashSet<IPointer> * LastPoint: Point * StartTime: System.DateTime
-    | Dragging of Pointers: ImmutableHashSet<IPointer> * LastPoint: Point * StartTime: System.DateTime
-
-type DragMoveEventArgs (event, source: objnull, delta: Avalonia.Vector, keyModifiers: KeyModifiers) =
-    inherit RoutedEventArgs (event, source)
-
-    member this.Delta = delta
-    member this.KeyModifiers = keyModifiers
-
-type DragMoveGestureRecognizer () =
-    inherit GestureRecognizer ()
-
-    let mutable dragState = NotStarted
-    static let dragMoveEvent = RoutedEvent<DragMoveEventArgs>("DragMove", RoutingStrategies.Bubble, typeof<DragMoveGestureRecognizer>)
-    static member DragMoveEvent = dragMoveEvent
-
-    override this.PointerPressed (e: PointerPressedEventArgs): unit = 
-        let point = e.GetCurrentPoint(null)
-        match dragState with
-        | NotStarted ->
-            match e.Pointer.Type with
-            | PointerType.Mouse when point.Properties.IsLeftButtonPressed ->
-                dragState <- Pressed (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
-            | PointerType.Touch ->
-                dragState <- Pressed (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
-            | PointerType.Pen ->
-                dragState <- Pressed (ImmutableHashSet.Create e.Pointer, point.Position, System.DateTime.Now)
-            | _ ->
-                // 他のポインタータイプは無視
-                ()
-        | Pressed (pointers, lastPoint, startTime) ->
-            if pointers.Contains e.Pointer then
-                // 既にドラッグ中のポインタータイプの場合は無視
-                e.Handled <- true
-            else
-                // 新しいポインタータイプが追加された場合はドラッグ状態を更新
-                dragState <- Pressed (pointers.Add e.Pointer, lastPoint, startTime)
-        | Dragging (pointers, lastPoint, startTime) ->
-            if pointers.Contains e.Pointer then
-                // 既にドラッグ中のポインタータイプの場合は無視
-                e.Handled <- true
-            else
-                // 新しいポインタータイプが追加された場合はドラッグ状態を更新
-                dragState <- Dragging (pointers.Add e.Pointer, lastPoint, startTime)
-
-    override this.PointerReleased (e: PointerReleasedEventArgs): unit = 
-        match dragState with
-        | NotStarted ->
-            // ドラッグが開始されていない場合は無視
-            e.Handled <- false
-        | Pressed (pointers, lastPoint, startTime) ->
-            if pointers.Contains e.Pointer then
-                // ドラッグ中のポインタータイプがリリースされた場合
-                if pointers.Count = 1 then
-                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
-                    dragState <- NotStarted
-                    e.Handled <- false
-                else
-                    // 他のポインターが残っている場合はドラッグ状態を更新
-                    dragState <- Pressed (pointers.Remove e.Pointer, lastPoint, startTime)
-                    e.Handled <- true
-            else
-                // 他のポインタータイプがリリースされた場合は無視
-                e.Handled <- false
-        | Dragging (pointers, lastPoint, startTime) ->
-            if pointers.Contains e.Pointer then
-                // ドラッグ中のポインタータイプがリリースされた場合
-                let point = e.GetCurrentPoint(null)
-                if pointers.Count = 1 then
-                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
-                    dragState <- NotStarted
-                else
-                    // 他のポインターが残っている場合はドラッグ状態を更新
-                    dragState <- Dragging (pointers.Remove e.Pointer, point.Position, startTime)
-                e.Handled <- true
-            else
-                // 他のポインタータイプがリリースされた場合は無視
-                e.Handled <- false
-
-    override this.PointerCaptureLost (pointer: IPointer): unit = 
-        match dragState with
-        | NotStarted ->
-            // ドラッグが開始されていない場合は無視
-            ()
-        | Pressed (pointers, lastPoint, startTime) ->
-            if pointers.Contains pointer then
-                if pointers.Count = 1 then
-                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
-                    dragState <- NotStarted
-                else
-                    // 他のポインターが残っている場合はドラッグ状態を更新
-                    dragState <- Pressed (pointers.Remove pointer, lastPoint, startTime)
-        | Dragging (pointers, lastPoint, startTime) ->
-            if pointers.Contains pointer then
-                if pointers.Count = 1 then
-                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
-                    dragState <- NotStarted
-                else
-                    // 他のポインターが残っている場合はドラッグ状態を更新
-                    dragState <- Dragging (pointers.Remove pointer, lastPoint, startTime)
-
-    override this.PointerMoved (e: PointerEventArgs): unit = 
-        match dragState with
-        | NotStarted ->
-            // ドラッグが開始されていない場合は無視
-            e.Handled <- false
-        | Pressed (pointers, lastPoint, startTime) ->
-            if pointers.Contains e.Pointer then
-                let point = e.GetCurrentPoint(null)
-                let delta = point.Position - lastPoint
-                if delta.X * delta.X + delta.Y * delta.Y > 8.0 * 8.0 then
-                    let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y), e.KeyModifiers)
-                    match this.Target with
-                    | Null -> ()
-                    | NonNull target -> target.RaiseEvent args
-                    dragState <- Dragging (pointers, point.Position, startTime)
-                else
-                    ()
-                e.Handled <- true
-            else
-                // 他のポインタータイプがリリースされた場合は無視
-                e.Handled <- false
-        | Dragging (pointers, lastPoint, startTime) ->
-            if pointers.Contains e.Pointer then
-                let point = e.GetCurrentPoint(null)
-                let delta = point.Position - lastPoint
-                let args = DragMoveEventArgs(DragMoveGestureRecognizer.DragMoveEvent, this.Target, Vector(delta.X, delta.Y), e.KeyModifiers)
-                match this.Target with
-                | Null -> ()
-                | NonNull target -> target.RaiseEvent args
-                dragState <- Dragging (pointers, point.Position, startTime)
-                e.Handled <- true
-            else
-                // 他のポインタータイプがリリースされた場合は無視
-                e.Handled <- false
-
-[<CustomEquality; CustomComparison>]
-type PressedPointer =
-    {
-        Pointer: IPointer
-        StartTime: int64
-        StartPoint: Point
-        LastPoint: Point
-    }
-    override this.Equals(obj) =
-        match obj with
-        | :? PressedPointer as x ->
-            x.Pointer.Id = this.Pointer.Id
-        | _ ->
-            false
-
-    override this.GetHashCode (): int = 
-        this.Pointer.Id.GetHashCode()
-
-    interface System.IComparable with
-        member this.CompareTo(obj) =
-            match obj with
-            | :? PressedPointer as x ->
-                compare this.Pointer.Id x.Pointer.Id
-            | _ ->
-                invalidArg "obj" "Cannot compare PressedPointer with other types."
-
-module PressedPointer =
-    let create pointer startPoint =
-        let timestamp = System.Diagnostics.Stopwatch.GetTimestamp()
-        { Pointer = pointer; StartTime = timestamp; StartPoint = startPoint; LastPoint = startPoint }
-type PointerState =
-    {
-        Pointer: IPointer
-        StartTime: int64
-        StartPoint: Point
-        LastPoint: Point
+            return None
+        | Some file ->
+            return! openImageFileAsync file
     }
 
-type PinchState =
-    | NotStarted of Pointers: Map<int, PointerState>
-    | DraggingWithRotation of Pointers: Map<int, PointerState>
-    | DraggingWithScaling of Pointers: Map<int, PointerState>
+let init (host: HostWindow) args =
+    let settingsDir = System.IO.Path.Join(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData, Environment.SpecialFolderOption.Create), 
+        "ZenkeiViewer")
+    System.IO.Directory.CreateDirectory(settingsDir) |> ignore
 
-// 回転と拡縮が排他操作な PinchGestureRecognizer
-type ExclusivePinchGestureRecognizer () =
-    inherit GestureRecognizer ()
+    let db = new LiteDatabase(ConnectionString(Filename=System.IO.Path.Join(settingsDir, "ZenkeiViewerSettings.db"), Upgrade=true, AutoRebuild=true, Connection=ConnectionType.Shared), liteDBMapper)
+    let collection = db.GetCollection<PerImageSettings>()
+    collection.EnsureIndex("Updated") |> ignore
 
-    let mutable state = NotStarted Map.empty
+    match Array.tryHead args with
+    | Some path ->
+        let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
+        { db=db; fullScreen=false; image=PerImageState.defaultState; pinchState=PinchState.none }, cmd
+    | None ->
+        { db=db; fullScreen=false; image=PerImageState.defaultState; pinchState=PinchState.none }, Cmd.none
 
-    let onRotate (eventTarget:IInputElement) current oldest =
-        let originalAngle = (atan2 (current.StartPoint.Y - oldest.StartPoint.Y) (current.StartPoint.X - oldest.StartPoint.X)) * 1.0<rad> |> toDeg
-        let angle = (atan2 (current.LastPoint.Y - oldest.LastPoint.Y) (current.LastPoint.X - oldest.LastPoint.X)) * 1.0<rad> |> toDeg
-        let angleDelta = angle - originalAngle
-        let angleDelta =
-            if angleDelta > 180.0<deg> then
-                angleDelta - 360.0<deg>
-            elif angleDelta < -180.0<deg> then
-                angleDelta + 360.0<deg>
-            else
-                angleDelta
-
-        let scaleOrigin = oldest.StartPoint + current.StartPoint / 2.0
-        let args = PinchEventArgs(1.0, scaleOrigin, angle / 1.0<deg>, angleDelta / 1.0<deg>)
-        eventTarget.RaiseEvent args
-
-    let onScale (eventTarget:IInputElement) current oldest =
-        let originalDistance = Vector.Distance(Vector(current.StartPoint.X, current.StartPoint.Y), Vector(oldest.StartPoint.X, oldest.StartPoint.Y))
-        let distance = Vector.Distance(Vector(current.LastPoint.X, current.LastPoint.Y), Vector(oldest.LastPoint.X, oldest.LastPoint.Y))
-        let distanceScale = distance / originalDistance
-        let angle = (atan2 (current.LastPoint.Y - oldest.LastPoint.Y) (current.LastPoint.X - oldest.LastPoint.X)) * 1.0<rad> |> toDeg
-
-        let scaleOrigin = oldest.StartPoint + current.StartPoint / 2.0
-        let args = PinchEventArgs(distanceScale, scaleOrigin, angle / 1.0<deg>, 0.0)
-        eventTarget.RaiseEvent args
-
-    let pointerReleased (eventTarget:IInputElement | null) pointer =
-        match state with
-        | NotStarted pointers ->
-            // ドラッグが開始されていない場合はドラッグ状態を更新
-            if Map.containsKey pointer pointers then
-                state <- Map.remove pointer pointers |> NotStarted
-                true
-            else
-                false
-        | DraggingWithRotation pointers ->
-            if Map.containsKey pointer pointers then
-                // ドラッグ中のポインタータイプがリリースされた場合
-                let pointers = Map.remove pointer pointers
-                if Map.isEmpty pointers then
-                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
-                    state <- NotStarted pointers
-                    match eventTarget with
-                    | Null -> ()
-                    | NonNull target ->
-                        let args = PinchEndedEventArgs()
-                        target.RaiseEvent args
-                else
-                    // 他のポインターが残っている場合はドラッグ状態を更新
-                    state <- DraggingWithRotation pointers
-                true
-            else
-                // 他のポインタータイプがリリースされた場合は無視
-                false
-        | DraggingWithScaling pointers ->
-            if Map.containsKey pointer pointers then
-                // ドラッグ中のポインタータイプがリリースされた場合
-                let pointers = Map.remove pointer pointers
-                if Map.isEmpty pointers then
-                    // 最後のポインターがリリースされた場合はドラッグ状態をリセット
-                    state <- NotStarted pointers
-                    match eventTarget with
-                    | Null -> ()
-                    | NonNull target ->
-                        let args = PinchEndedEventArgs()
-                        target.RaiseEvent args
-                else
-                    // 他のポインターが残っている場合はドラッグ状態を更新
-                    state <- DraggingWithScaling pointers
-                true
-            else
-                // 他のポインタータイプがリリースされた場合は無視
-                false
-
-    override this.PointerPressed (e: PointerPressedEventArgs): unit = 
-        match e.Pointer.Type with
-        | PointerType.Touch ->
-            let pos = e.GetCurrentPoint(null).Position
-            let pointerState = { Pointer=e.Pointer; StartTime = System.Diagnostics.Stopwatch.GetTimestamp(); StartPoint = pos; LastPoint = pos }
-            match state with
-            | NotStarted pointers -> 
-                let pointers = Map.add e.Pointer.Id pointerState pointers
-                if Map.count pointers >= 2 then
-                    for p in Map.values pointers do
-                        this.Capture(p.Pointer)
-                    e.PreventGestureRecognition()
-                state <- NotStarted pointers
-            | DraggingWithScaling pointers ->
-                this.Capture(e.Pointer)
-                let pointers = Map.add e.Pointer.Id pointerState pointers
-                state <- DraggingWithScaling pointers
-                e.PreventGestureRecognition()
-            | DraggingWithRotation pointers ->
-                this.Capture(e.Pointer)
-                state <- DraggingWithRotation pointers
-                e.PreventGestureRecognition()
-        | _ ->
-            // 他のポインタータイプは無視
-            ()
-
-    override this.PointerReleased (e: PointerReleasedEventArgs): unit = 
-        let handled = pointerReleased this.Target e.Pointer.Id
-        e.Handled <- handled
-
-    override this.PointerCaptureLost (pointer: IPointer): unit = 
-        pointerReleased this.Target pointer.Id |> ignore
-
-    override this.PointerMoved (e: PointerEventArgs): unit = 
-        match e.Pointer.Type with
-        | PointerType.Touch ->
-            match state with
-            | NotStarted pointers ->
-                if Map.containsKey e.Pointer.Id pointers && Map.count pointers >= 2 then
-                    let pos = e.GetCurrentPoint(null).Position
-                    let current = { Map.find e.Pointer.Id pointers with LastPoint = pos }
-                    let pointers = Map.add e.Pointer.Id current pointers
-                    let oldest =
-                        pointers
-                        |> Map.remove e.Pointer.Id
-                        |> Map.values
-                        |> Seq.sortBy (fun p -> p.StartTime)
-                        |> Seq.head
-                    let originalDistance = Vector.Distance(Vector(current.StartPoint.X, current.StartPoint.Y), Vector(oldest.StartPoint.X, oldest.StartPoint.Y))
-                    let distance = Vector.Distance(Vector(current.LastPoint.X, current.LastPoint.Y), Vector(oldest.LastPoint.X, oldest.LastPoint.Y))
-                    let distanceScale = distance / originalDistance
-                    let originalAngle = (atan2 (current.StartPoint.Y - oldest.StartPoint.Y) (current.StartPoint.X - oldest.StartPoint.X)) * 1.0<rad> |> toDeg
-                    let angle = (atan2 (current.LastPoint.Y - oldest.LastPoint.Y) (current.LastPoint.X - oldest.LastPoint.X)) * 1.0<rad> |> toDeg
-                    let angleDelta = angle - originalAngle
-                    if abs (distanceScale - 1.0) > 0.1 then
-                        state <- DraggingWithScaling pointers
-                        for p in Map.values pointers do
-                            this.Capture(p.Pointer)
-                    elif abs angleDelta > 5.0<deg> then
-                        state <- DraggingWithRotation pointers
-                        for p in Map.values pointers do
-                            this.Capture(p.Pointer)
-                    else
-                        state <- NotStarted pointers
-                    e.Handled <- true
-                    e.PreventGestureRecognition()
-                else
-                    e.Handled <- false
-            | DraggingWithRotation pointers ->
-                if Map.containsKey e.Pointer.Id pointers && Map.count pointers >= 2 then
-                    let pos = e.GetCurrentPoint(null).Position
-                    let current = { Map.find e.Pointer.Id pointers with LastPoint = pos }
-                    let pointers = Map.add e.Pointer.Id current pointers
-                    let oldest =
-                        pointers
-                        |> Map.remove e.Pointer.Id
-                        |> Map.values
-                        |> Seq.sortBy (fun p -> p.StartTime)
-                        |> Seq.head
-                    match this.Target with
-                    | Null -> ()
-                    | NonNull target ->
-                        onRotate target current oldest
-
-                    state <- DraggingWithRotation pointers
-                    e.Handled <- true
-                    e.PreventGestureRecognition()
-                else
-                    // 他のポインタータイプがリリースされた場合は無視
-                    e.Handled <- false
-            | DraggingWithScaling pointers ->
-                if Map.containsKey e.Pointer.Id pointers && Map.count pointers >= 2 then
-                    let pos = e.GetCurrentPoint(null).Position
-                    let current = { Map.find e.Pointer.Id pointers with LastPoint = pos }
-                    let pointers = Map.add e.Pointer.Id current pointers
-                    let oldest =
-                        pointers
-                        |> Map.remove e.Pointer.Id
-                        |> Map.values
-                        |> Seq.sortBy (fun p -> p.StartTime)
-                        |> Seq.head
-                    match this.Target with
-                    | Null -> ()
-                    | NonNull target ->
-                        onScale target current oldest
-
-                    state <- DraggingWithScaling pointers
-                    e.Handled <- true
-                    e.PreventGestureRecognition()
-                else
-                    // 他のポインタータイプがリリースされた場合は無視
-                    e.Handled <- false
-        | _ ->
-            // 他のポインタータイプは無視
-            ()
-
-[<AutoOpen>]
-module ImageViewControl =
-    open Avalonia.FuncUI.DSL
-    open Avalonia.FuncUI.Types
-    open Avalonia.FuncUI.Builder
-
-    let create(attrs: IAttr<ImageViewControl> list): IView<ImageViewControl> =
-        ViewBuilder.Create<ImageViewControl>(attrs)
-
-    type ImageViewControl with
-        static member fov<'t when 't :> ImageViewControl>(value: float<deg>) : IAttr<'t> =
-            AttrBuilder<'t>.CreateProperty<float<deg>>(ImageViewControl.FovProperty, value, ValueNone)
-
-        static member distance<'t when 't :> ImageViewControl>(value: float) : IAttr<'t> =
-            AttrBuilder<'t>.CreateProperty<float>(ImageViewControl.DistanceProperty, value, ValueNone)
-
-        static member direction<'t when 't :> ImageViewControl>(value: Quaternion) : IAttr<'t> =
-            AttrBuilder<'t>.CreateProperty<Quaternion>(ImageViewControl.DirectionProperty, value, ValueNone)
-
-        static member pan<'t when 't :> ImageViewControl>(value) =
-            AttrBuilder<'t>.CreateProperty(ImageViewControl.PanProperty, value, ValueNone)
-
-        static member image<'t when 't :> ImageViewControl>(value: SKBitmap option) : IAttr<'t> =
-            AttrBuilder<'t>.CreateProperty<SKBitmap option>(ImageViewControl.ImageProperty, value, ValueNone)
-
-        static member viewEquirectangular<'t when 't :> ImageViewControl>(value) =
-            AttrBuilder<'t>.CreateProperty<bool>(ImageViewControl.ViewEquirectangularProperty, value, ValueNone)
-
-        static member onDragMove<'t when 't :> InputElement>(func: DragMoveEventArgs-> unit, ?subPatchOptions) =
-            AttrBuilder<'t>.CreateSubscription<DragMoveEventArgs>(DragMoveGestureRecognizer.DragMoveEvent, func, ?subPatchOptions = subPatchOptions)
-
-        static member onPinch<'t when 't :> InputElement>(func, ?subPatchOptions) =
-            AttrBuilder<'t>.CreateSubscription(Gestures.PinchEvent, func, ?subPatchOptions = subPatchOptions)
-
-        static member onPinchEnded<'t when 't :> InputElement>(func, ?subPatchOptions) =
-            AttrBuilder<'t>.CreateSubscription(Gestures.PinchEndedEvent, func, ?subPatchOptions = subPatchOptions)
-
-module Viewer =
-    open Avalonia.FuncUI.DSL
-    open Avalonia.Layout
-
-    type Image = {
-        bitmap: SKBitmap
-        file: IStorageFile
-        folder: IStorageFolder option
-        equirectangular: bool
-    }
-
-    type PerImageState = {
-        fov: float<deg>
-        distance: float
-        yaw: float<deg>
-        pitch: float<deg>
-        roll: float<deg>
-        pan: Vector
-        useEquirectangular: bool
-        source: Image option
-    }
-
-    module PerImageState =
-        let defaultState = {
-            fov = 60.0<deg>
-            distance = 0.5
-            yaw = 0.0<deg>
-            pitch = 0.0<deg>
-            roll = 0.0<deg>
-            pan = Vector.Zero
-            useEquirectangular = true
-            source = None
-        }
-
-    type PinchState = {
-        originalScale: float option
-        originalAngle: float<deg> option
-    }
-
-    module PinchState =
-        let none = { originalScale = None; originalAngle = None }
-        let scale originalScale = { none with originalScale = Some originalScale }
-        let rotate originalAngle = { none with originalAngle = Some originalAngle }
-
-    type State = {
-        db: LiteDatabase
-        fullScreen: bool
-        image: PerImageState
-        pinchState: PinchState
-    }
-
-    module PerImageSettings =
-        let pathToId (path: string) =
-            System.IO.Hashing.XxHash128.Hash(System.Text.Encoding.UTF8.GetBytes(path))
-
-    type PerImageSettings () =
-        let mutable sourcePath = ""
-        [<BsonId>]
-        member val Id: byte array = [||] with get, set
-        member val Updated : System.DateTime = System.DateTime.Now with get, set
-        member val Fov: float<deg> = 60.0<deg> with get, set
-        member val Distance: float = 0.5 with get, set
-        member val Yaw: float<deg> = 0.0<deg> with get, set
-        member val Pitch: float<deg> = 0.0<deg> with get, set
-        member val Roll: float<deg> = 0.0<deg> with get, set
-        member val PanX: float = 0.0 with get, set
-        member val PanY: float = 0.0 with get, set
-        member val UseEquirectangular: bool = true with get, set
-        member this.SourcePath
-            with get () = sourcePath
-            and set value =
-                sourcePath <- value
-                this.Id <- PerImageSettings.pathToId value
-
-        static member serialize (settings: PerImageSettings) : BsonValue =
-            let doc = BsonDocument()
-            doc["_id"] <- settings.Id
-            doc["Updated"] <- settings.Updated
-            doc["Fov"] <- float settings.Fov
-            doc["Distance"] <- settings.Distance
-            doc["Yaw"] <- float settings.Yaw
-            doc["Pitch"] <- float settings.Pitch
-            doc["Roll"] <- float settings.Roll
-            doc["PanX"] <- settings.PanX
-            doc["PanY"] <- settings.PanY
-            doc["UseEquirectangular"] <- settings.UseEquirectangular
-            doc["SourcePath"] <- settings.SourcePath
-            doc
-
-        static member deserialize (doc: BsonValue) =
-            let settings = PerImageSettings()
-            settings.Id <- doc["_id"].AsBinary
-            settings.Updated <- doc["Updated"].AsDateTime
-            settings.Fov <- doc["Fov"].AsDouble * 1.0<deg>
-            settings.Distance <- doc["Distance"].AsDouble
-            settings.Yaw <- doc["Yaw"].AsDouble * 1.0<deg>
-            settings.Pitch <- doc["Pitch"].AsDouble * 1.0<deg>
-            settings.Roll <- doc["Roll"].AsDouble * 1.0<deg>
-            settings.PanX <- doc["PanX"].AsDouble
-            settings.PanY <- doc["PanY"].AsDouble
-            settings.UseEquirectangular <- doc["UseEquirectangular"].AsBoolean
-            settings.SourcePath <- doc["SourcePath"].AsString
-            settings
-
-    let liteDBMapper = BsonMapper()
-    liteDBMapper.RegisterType<PerImageSettings>(
-        (fun t -> PerImageSettings.serialize t),
-        (fun d -> PerImageSettings.deserialize d)
-    )
-
-    type Msg =
-    | NextImage
-    | PreviousImage
-    | SelectImage
-    | OpenImage of PerImageState option
-    | OpenFile of IStorageFile
-    | OpenFolder of IStorageFolder
-    | ResetView
-    | Zoom of float
-    | Pinch of scale: float * angle: float<deg>
-    | PinchEnd
-    | ZoomFov of float
-    | Move of delta: Vector * size: Vector
-    | Roll of delta: Vector * size: Vector
-    | RollAngle of delta: float<deg>
-    | SetViewEquirectangular of bool
-    | ToggleFullScreen
-    | ExitFullScreen
-    | Exiting
-    | Exit
-
-    let openImageFileWithFolderAsync (file: IStorageFile) (folder: IStorageFolder option) =
-        task {
-            use! strm = file.OpenReadAsync()
-            let metadata = MetadataExtractor.ImageMetadataReader.ReadMetadata(strm)
-            let useEquirectangular =
-                metadata
-                |> Seq.tryPick (fun dir ->
-                    match dir with
-                    | :? MetadataExtractor.Formats.Xmp.XmpDirectory as xmpDir ->
-                        let props = xmpDir.GetXmpProperties()
-                        match (props.TryGetValue "GPano:ProjectionType", props.TryGetValue "GPano:UsePanoramaViewer") with
-                        | ((true, v1), (true, v2)) ->
-                            (String.Equals(v1, "equirectangular", StringComparison.InvariantCultureIgnoreCase) && XmpCore.XmpUtils.ConvertToBoolean(v2)) |> Some
-                        | ((true, v1), (false, _)) ->
-                            String.Equals(v1, "equirectangular", StringComparison.InvariantCultureIgnoreCase) |> Some
-                        | ((false, _), _) ->
-                            Some false
-                    | _ ->
-                        None
-                )
-                |> Option.defaultValue false
-            strm.Position <- 0
-            let bitmap = SKBitmap.Decode(strm)
-            let imageSource = { bitmap=bitmap; file=file; folder=folder; equirectangular=useEquirectangular } |> Some
-            return { PerImageState.defaultState with useEquirectangular=useEquirectangular; source=imageSource } |> Some
-        }
-
-    let openImageFileAsync (file: IStorageFile) =
-        task {
-            let! folder = file.GetParentAsync()
-            let folder = Option.ofObj folder
-            return! openImageFileWithFolderAsync file folder
-        }
-
-    let isImageFile (item: IStorageItem) =
-        match item with
-        | :? IStorageFile as f ->
-            let ext =
-                System.IO.Path.GetExtension(f.Name)
-                |> Option.ofObj
-                |> Option.map _.ToLowerInvariant()
-                |> Option.defaultValue ""
-            match ext with
-            | ".jpg" | ".jpeg" | ".jpe" | ".jif" | ".jfif"
-            | ".png"
-            | ".webp"
-            | ".bmp"
-            | ".avif" ->
-                Some f
-            | _ ->
-                None
-        | _ -> None
-
-    let getImagesFromFolderAsync (folder: IStorageFolder) =
-        folder.GetItemsAsync()
-        |> TaskSeq.choose isImageFile
-
-    let openImageFileFromFolderAsync (folder: IStorageFolder) =
-        task {
-            match! getImagesFromFolderAsync folder |> TaskSeq.tryHead with
-            | Some file ->
-                return! openImageFileWithFolderAsync file (Some folder)
-            | None ->
-                return None
-        }
-
-    let selectImageAsync (host: HostWindow) =
-        task {
-            let filters = [
-                Platform.Storage.FilePickerFileType("Image Files",
-                    Patterns=[
-                        "*.jpg"; "*.JPG"; "*.jpe"; "*.JPE"; "*.jpeg"; "*.JPEG"; "*.jif"; "*.JIF"; "*.jfif"; "*.JFIF"
-                        "*.png"; "*.PNG"
-                        "*.webp"; "*.WEBP"
-                        "*.bmp"; "*.BMP"
-                        "*.avif"; "*.AVIF"
-                    ],
-                    MimeTypes=[
-                        "image/jpeg"
-                        "image/png"
-                        "image/webp"
-                        "image/bmp"
-                        "image/avif"
-                    ]
-                )
-            ]
-            let! files =
-                Platform.Storage.FilePickerOpenOptions(AllowMultiple=false, FileTypeFilter=filters)
-                |> host.StorageProvider.OpenFilePickerAsync
-            match Seq.tryHead files |> Option.bind isImageFile with
-            | Some file ->
-                return! openImageFileAsync file
-            | None ->
-                return None
-        }
-
-    let openImageByPath (host: HostWindow) (path: string) =
-        task {
-            let! item = host.StorageProvider.TryGetFileFromPathAsync path
-            match item |> Option.ofObj |> Option.bind isImageFile with
-            | None ->
-                return None
-            | Some file ->
-                return! openImageFileAsync file
-        }
-
-    let init (host: HostWindow) args =
-        let settingsDir = System.IO.Path.Join(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData, Environment.SpecialFolderOption.Create), 
-            "ZenkeiViewer")
-        System.IO.Directory.CreateDirectory(settingsDir) |> ignore
-
-        let db = new LiteDatabase(ConnectionString(Filename=System.IO.Path.Join(settingsDir, "ZenkeiViewerSettings.db"), Upgrade=true, AutoRebuild=true, Connection=ConnectionType.Shared), liteDBMapper)
-        let collection = db.GetCollection<PerImageSettings>()
-        collection.EnsureIndex("Updated") |> ignore
-
-        match Array.tryHead args with
-        | Some path ->
-            let cmd = Cmd.OfTask.perform (openImageByPath host) path OpenImage
-            { db=db; fullScreen=false; image=PerImageState.defaultState; pinchState=PinchState.none }, cmd
-        | None ->
-            { db=db; fullScreen=false; image=PerImageState.defaultState; pinchState=PinchState.none }, Cmd.none
-
-    let update (host: HostWindow) (msg: Msg) (state: State) =
-        match msg with
-        | NextImage ->
-            match state.image.source with
-            | Some { file=file; folder=Some folder } ->
-                let getNextImage () =
-                    task {
-                        let! files = getImagesFromFolderAsync folder |> TaskSeq.toArrayAsync
-                        let next =
-                            files
-                            |> Array.tryFindIndex (fun item -> item.Path = file.Path)
-                            |> Option.map (fun idx -> files[(idx + 1) % Array.length files])
-                        return!
-                            next
-                            |> Option.defaultValue file
-                            |> openImageFileAsync
-                    }
-                let cmd = Cmd.OfTask.perform getNextImage () OpenImage
-                state, cmd
-            | _ ->
-                state, Cmd.none
-        | PreviousImage ->
-            match state.image.source with
-            | Some { file=file; folder=Some folder } ->
-                let getPreviousImage () =
-                    task {
-                        let! files = getImagesFromFolderAsync folder |> TaskSeq.toArrayAsync
-                        let prev =
-                            files
-                            |> Array.tryFindIndex (fun item -> item.Path = file.Path)
-                            |> Option.map (fun idx -> files[(idx + Array.length files - 1) % Array.length files])
-                        return!
-                            prev
-                            |> Option.defaultValue file
-                            |> openImageFileAsync
-                    }
-                let cmd = Cmd.OfTask.perform getPreviousImage () OpenImage
-                state, cmd
-            | _ ->
-                state, Cmd.none
-        | SelectImage ->
-            let cmd = Cmd.OfTask.perform selectImageAsync host OpenImage
+let update (host: HostWindow) (msg: Msg) (state: State) =
+    match msg with
+    | NextImage ->
+        match state.image.source with
+        | Some { file=file; folder=Some folder } ->
+            let getNextImage () =
+                task {
+                    let! files = getImagesFromFolderAsync folder |> TaskSeq.toArrayAsync
+                    let next =
+                        files
+                        |> Array.tryFindIndex (fun item -> item.Path = file.Path)
+                        |> Option.map (fun idx -> files[(idx + 1) % Array.length files])
+                    return!
+                        next
+                        |> Option.defaultValue file
+                        |> openImageFileAsync
+                }
+            let cmd = Cmd.OfTask.perform getNextImage () OpenImage
             state, cmd
-        | OpenImage value ->
-            match value with
-            | None -> state, Cmd.none
-            | Some image ->
-                let collection = state.db.GetCollection<PerImageSettings>()
-
-                state.image.source
-                |> Option.iter (fun imageSource ->
-                    imageSource.bitmap.Dispose()
-                    let serializable = PerImageSettings(
-                        SourcePath = imageSource.file.Path.ToString(),
-                        Fov = state.image.fov,
-                        Distance = state.image.distance,
-                        Yaw = state.image.yaw,
-                        Pitch = state.image.pitch,
-                        Roll = state.image.roll,
-                        PanX = state.image.pan.X,
-                        PanY = state.image.pan.Y,
-                        UseEquirectangular = state.image.useEquirectangular
-                    )
-                    collection.Upsert(serializable) |> ignore
-                )
-
-                let entry =
-                    try
-                        image.source
-                        |> Option.bind (fun source ->
-                            source.file.Path.ToString()
-                            |> PerImageSettings.pathToId
-                            |> collection.FindById
-                            |> Option.ofObj
-                        )
-                    with
-                    | _ ->
-                        None
-                match entry with
-                | Some e ->
-                    let newImageState = {
-                        fov = e.Fov
-                        distance = e.Distance
-                        yaw = e.Yaw
-                        pitch = e.Pitch
-                        roll = e.Roll
-                        pan = Vector(e.PanX, e.PanY)
-                        useEquirectangular = e.UseEquirectangular
-                        source = image.source
-                    }
-                    { state with image=newImageState; pinchState=PinchState.none }, Cmd.none
-                | None ->
-                    { state with image=image; pinchState=PinchState.none }, Cmd.none
-        | OpenFile file ->
-            let cmd = Cmd.OfTask.perform openImageFileAsync file OpenImage
+        | _ ->
+            state, Cmd.none
+    | PreviousImage ->
+        match state.image.source with
+        | Some { file=file; folder=Some folder } ->
+            let getPreviousImage () =
+                task {
+                    let! files = getImagesFromFolderAsync folder |> TaskSeq.toArrayAsync
+                    let prev =
+                        files
+                        |> Array.tryFindIndex (fun item -> item.Path = file.Path)
+                        |> Option.map (fun idx -> files[(idx + Array.length files - 1) % Array.length files])
+                    return!
+                        prev
+                        |> Option.defaultValue file
+                        |> openImageFileAsync
+                }
+            let cmd = Cmd.OfTask.perform getPreviousImage () OpenImage
             state, cmd
-        | OpenFolder folder ->
-            let cmd = Cmd.OfTask.perform openImageFileFromFolderAsync folder OpenImage
-            state, cmd
-        | ResetView ->
-            let newImageState =
-                match state.image.source with
-                | Some img ->
-                    { PerImageState.defaultState with useEquirectangular=img.equirectangular; source=Some img }
-                | None ->
-                    PerImageState.defaultState
-            { state with image=newImageState; pinchState=PinchState.none }, Cmd.none
-        | Pinch (scale, angle) ->
-            match state.pinchState with
-            | { originalScale=None; originalAngle=None } ->
-                if abs (scale - 1.0) > 0.1 then
-                    let originalScale = Option.defaultValue state.image.distance state.pinchState.originalScale
-                    let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
-                    let newDistance = originalScale + (1.0 - scale) * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
-                    { state with image={ state.image with distance=newDistance }; pinchState=PinchState.scale originalScale }, Cmd.none
-                elif abs angle > 5.0<deg> then
-                    let originalAngle = Option.defaultValue state.image.roll state.pinchState.originalAngle
-                    let newRoll = angle + originalAngle |> clamp -90.0<deg> 90.0<deg>
-                    { state with image={ state.image with roll=newRoll }; pinchState=PinchState.rotate originalAngle }, Cmd.none
-                else
-                    state, Cmd.none
-            | { originalScale=Some originalScale; originalAngle=_ } ->
-                let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
-                let newDistance = originalScale + (1.0 - scale) * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
-                { state with image={ state.image with distance=newDistance }; pinchState=PinchState.scale originalScale }, Cmd.none
-            | { originalScale=_; originalAngle=Some originalAngle } ->
-                let newRoll = angle + originalAngle |> clamp -90.0<deg> 90.0<deg>
-                { state with image={ state.image with roll=newRoll }; pinchState=PinchState.rotate originalAngle }, Cmd.none
-        | PinchEnd ->
-            { state with pinchState=PinchState.none }, Cmd.none
-        | RollAngle angleDelta ->
-            let roll = 
-                angleDelta + state.image.roll
-                |> clamp -90.0<deg> 90.0<deg>
-            { state with image={ state.image with roll=roll } }, Cmd.none
-        | Zoom delta ->
-            let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
-            let newDistance = state.image.distance + delta * 0.05 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
-            { state with image={ state.image with distance=newDistance } }, Cmd.none
-        | ZoomFov delta ->
-            let newFov = state.image.fov + delta * 2.5<deg> |> max 5.0<deg> |> min 90.0<deg>
-            let nearPlaneHeight = 2.0 * (state.image.distance + 1.0) * Math.Tan(state.image.fov / 2.0 |> toRad |> float)
-            let newDistance = (nearPlaneHeight / 2.0) / Math.Tan(newFov / 2.0 |> toRad |> float) - 1.0
-            { state with image={ state.image with distance=newDistance; fov=newFov } }, Cmd.none
-        | Roll (screenDelta , screenSize) ->
-            if state.image.useEquirectangular then
-                let fov = state.image.fov |> toRad |> single
-                let aspect = screenSize.X / screenSize.Y |> single
-                let distance = state.image.distance |> single
-
-                let forward = Vector3.UnitY
-                let upward = Vector3.UnitZ
-                let cameraPos = forward * -distance
-                let worldViewMatrix =
-                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                let viewProjectionMatrix =
-                    Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
-                let projectionViewportMatrix =
-                    Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X |> single, screenSize.Y |> single, 0.0f, 1.0f)
-                let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
-                let fromDir = forward - cameraPos
-                let toDir = Vector3.Transform(
-                    Vector3((screenDelta.X + (screenSize.X / 2.0)) |> single, (screenDelta.Y + (screenSize.Y / 2.0)) |> single, 0.0f), 
-                    viewportWorldMatrix)
-                let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
-                let roll = 
-                    (angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg) + state.image.roll
-                    |> clamp -90.0<deg> 90.0<deg>
-                { state with image={ state.image with roll=roll } }, Cmd.none
-            else
-                match state.image.source with
-                | None ->
-                    state, Cmd.none
-                | Some { bitmap=bmp } ->
-                    let forward = -Vector3.UnitZ
-                    let upward = Vector3.UnitY
-                    let aspect = screenSize.X / screenSize.Y
-                    let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
-                    let cameraPos = forward * single -state.image.distance
-                    let scale = 1.0 / (1.0 + state.image.distance)
-                    let scaleToFit =
-                        if imageAspect > aspect then
-                            Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
-                        else
-                            Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
-                    let worldViewMatrix =
-                        Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
-                        scaleToFit *
-                        Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                    let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
-                    let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
-                    let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
-                    let pan = Vector(
-                        state.image.pan.X + float delta.X |> clamp -1.0 1.0,
-                        state.image.pan.Y - float delta.Y |> clamp -1.0 1.0
-                    )
-                    { state with image={ state.image with pan=pan } }, Cmd.none
-        | Move (screenDelta , screenSize) ->
-            if state.image.useEquirectangular then
-                let fov = state.image.fov |> toRad |> single
-                let aspect = screenSize.X / screenSize.Y |> single
-                let distance = state.image.distance |> single
-
-                let forward = Vector3.UnitY
-                let upward = Vector3.UnitZ
-                let cameraPos = forward * -distance
-                let worldViewMatrix =
-                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                let viewProjectionMatrix =
-                    Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
-                let projectionViewportMatrix =
-                    Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X |> single, screenSize.Y |> single, 0.0f, 1.0f)
-                let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
-                let fromDir = forward - cameraPos
-                let toDir = Vector3.Transform(
-                    Vector3((screenDelta.X + (screenSize.X / 2.0)) |> single, (screenDelta.Y + (screenSize.Y / 2.0)) |> single, 0.0f), 
-                    viewportWorldMatrix)
-                let toDir1 = Vector3(toDir.X, toDir.Y, 0.0f) |> Vector3.Normalize
-                let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
-                let yawDelta = angleFromTo fromDir toDir1 Vector3.UnitZ |> toDeg
-                let pitchDelta = angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg
-                let roll =
-                    signf state.image.roll *
-                    (abs state.image.roll - 0.7 * (abs pitchDelta + abs yawDelta) |> max 0.0<deg>)
-                let yaw = state.image.yaw + yawDelta
-                let yaw =
-                    if yaw > 180.0<deg> then
-                        yaw - 360.0<deg>
-                    else if yaw < -180.0<deg> then
-                        yaw + 360.0<deg>
-                    else
-                        yaw
-                let pitch = clamp -90.0<deg> 90.0<deg> (state.image.pitch + pitchDelta)
-                let roll = clamp -90.0<deg> 90.0<deg> roll
-                { state with image={ state.image with yaw=yaw; pitch=pitch; roll=roll } }, Cmd.none
-            else
-                match state.image.source with
-                | None ->
-                    state, Cmd.none
-                | Some { bitmap=bmp } ->
-                    let forward = -Vector3.UnitZ
-                    let upward = Vector3.UnitY
-                    let aspect = screenSize.X / screenSize.Y
-                    let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
-                    let cameraPos = forward * single -state.image.distance
-                    let scale = 1.0 / (1.0 + state.image.distance)
-                    let scaleToFit =
-                        if imageAspect > aspect then
-                            Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
-                        else
-                            Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
-                    let worldViewMatrix =
-                        Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
-                        scaleToFit *
-                        Matrix4x4.CreateLookTo(cameraPos, forward, upward)
-                    let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
-                    let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
-                    let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
-                    let pan = Vector(
-                        state.image.pan.X + float delta.X |> clamp -1.0 1.0,
-                        state.image.pan.Y - float delta.Y |> clamp -1.0 1.0
-                    )
-                    { state with image={ state.image with pan=pan } }, Cmd.none
-        | SetViewEquirectangular value ->
-            { state with image={ state.image with useEquirectangular=value } }, Cmd.none
-        | ToggleFullScreen ->
-            if state.fullScreen then
-                host.WindowState <- WindowState.Normal
-            else
-                host.WindowState <- WindowState.FullScreen
-            { state with fullScreen = not state.fullScreen }, Cmd.none
-        | ExitFullScreen ->
-            if state.fullScreen then
-                host.WindowState <- WindowState.Normal
-            { state with fullScreen = false }, Cmd.none
-        | Exiting ->
+        | _ ->
+            state, Cmd.none
+    | SelectImage ->
+        let cmd = Cmd.OfTask.perform selectImageAsync host OpenImage
+        state, cmd
+    | OpenImage value ->
+        match value with
+        | None -> state, Cmd.none
+        | Some image ->
             let collection = state.db.GetCollection<PerImageSettings>()
 
-            state.db.BeginTrans() |> ignore
             state.image.source
             |> Option.iter (fun imageSource ->
                 imageSource.bitmap.Dispose()
@@ -1590,245 +340,475 @@ module Viewer =
                 collection.Upsert(serializable) |> ignore
             )
 
-            collection.Find(LiteDB.Query.All("Updated", LiteDB.Query.Descending), settingEntriesLimit, 1)
-            |> Seq.tryHead
-            |> Option.iter (fun oldest -> collection.DeleteMany(Query.LTE("Updated", oldest.Updated)) |> ignore)
-            state.db.Commit() |> ignore
-
-            state.db.Dispose()
-
-            state, Cmd.none
-
-        | Exit ->
-            host.Close()
-            state, Cmd.none
-
-    let view (host: HostWindow) (state: State) (dispatch) =
-        Grid.create [
-            Grid.classes ["root"]
-            Grid.allowDrop true
-            Grid.onDrop (fun args ->
-                match args.DataTransfer.TryGetFile() with
-                | :? IStorageFile as file ->
-                    OpenFile file |> dispatch
-                | :? IStorageFolder as folder ->
-                    OpenFolder folder |> dispatch
-                | _ -> ()
-            )
-            Grid.columnDefinitions [
-                ColumnDefinition(1.0, GridUnitType.Star, MinWidth=40.0, MaxWidth=80.0)
-                ColumnDefinition(8.0, GridUnitType.Star)
-                ColumnDefinition(1.0, GridUnitType.Star, MinWidth=40.0, MaxWidth=80.0)
-            ]
-            Grid.rowDefinitions "Auto, *"
-            Grid.children [
-                ImageViewControl.create [
-                    ImageViewControl.init (fun ivc ->
-                        ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
-                        ivc.GestureRecognizers.Add(ExclusivePinchGestureRecognizer())
+            let entry =
+                try
+                    image.source
+                    |> Option.bind (fun source ->
+                        source.file.Path.ToString()
+                        |> PerImageSettings.pathToId
+                        |> collection.FindById
+                        |> Option.ofObj
                     )
-                    ImageViewControl.focusable true
-                    ImageViewControl.row 0
-                    ImageViewControl.rowSpan 2
-                    ImageViewControl.column 0
-                    ImageViewControl.columnSpan 3
-                    ImageViewControl.horizontalAlignment HorizontalAlignment.Stretch
-                    ImageViewControl.verticalAlignment VerticalAlignment.Stretch
-                    ImageViewControl.image (state.image.source |> Option.map _.bitmap)
-                    ImageViewControl.fov state.image.fov
-                    ImageViewControl.distance state.image.distance
-                    ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) (state.image.roll |> toRad))
-                    ImageViewControl.pan state.image.pan
-                    ImageViewControl.viewEquirectangular state.image.useEquirectangular
-                    ImageViewControl.onPointerWheelChanged 
-                        (fun args ->
-                            if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
-                                ZoomFov -args.Delta.Y
-                            else
-                                Zoom -args.Delta.Y
+                with
+                | _ ->
+                    None
+            match entry with
+            | Some e ->
+                let newImageState = {
+                    fov = e.Fov
+                    distance = e.Distance
+                    yaw = e.Yaw
+                    pitch = e.Pitch
+                    roll = e.Roll
+                    pan = Vector(e.PanX, e.PanY)
+                    useEquirectangular = e.UseEquirectangular
+                    source = image.source
+                }
+                { state with image=newImageState; pinchState=PinchState.none }, Cmd.none
+            | None ->
+                { state with image=image; pinchState=PinchState.none }, Cmd.none
+    | OpenFile file ->
+        let cmd = Cmd.OfTask.perform openImageFileAsync file OpenImage
+        state, cmd
+    | OpenFolder folder ->
+        let cmd = Cmd.OfTask.perform openImageFileFromFolderAsync folder OpenImage
+        state, cmd
+    | ResetView ->
+        let newImageState =
+            match state.image.source with
+            | Some img ->
+                { PerImageState.defaultState with useEquirectangular=img.equirectangular; source=Some img }
+            | None ->
+                PerImageState.defaultState
+        { state with image=newImageState; pinchState=PinchState.none }, Cmd.none
+    | Pinch (scale, angle) ->
+        match state.pinchState with
+        | { originalScale=None; originalAngle=None } ->
+            if abs (scale - 1.0) > 0.1 then
+                let originalScale = Option.defaultValue state.image.distance state.pinchState.originalScale
+                let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+                let newDistance = originalScale + (1.0 - scale) * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+                { state with image={ state.image with distance=newDistance }; pinchState=PinchState.scale originalScale }, Cmd.none
+            elif abs angle > 5.0<deg> then
+                let originalAngle = Option.defaultValue state.image.roll state.pinchState.originalAngle
+                let newRoll = angle + originalAngle |> clamp -90.0<deg> 90.0<deg>
+                { state with image={ state.image with roll=newRoll }; pinchState=PinchState.rotate originalAngle }, Cmd.none
+            else
+                state, Cmd.none
+        | { originalScale=Some originalScale; originalAngle=_ } ->
+            let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+            let newDistance = originalScale + (1.0 - scale) * 0.5 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+            { state with image={ state.image with distance=newDistance }; pinchState=PinchState.scale originalScale }, Cmd.none
+        | { originalScale=_; originalAngle=Some originalAngle } ->
+            let newRoll = angle + originalAngle |> clamp -90.0<deg> 90.0<deg>
+            { state with image={ state.image with roll=newRoll }; pinchState=PinchState.rotate originalAngle }, Cmd.none
+    | PinchEnd ->
+        { state with pinchState=PinchState.none }, Cmd.none
+    | RollAngle angleDelta ->
+        let roll = 
+            angleDelta + state.image.roll
+            |> clamp -90.0<deg> 90.0<deg>
+        { state with image={ state.image with roll=roll } }, Cmd.none
+    | Zoom delta ->
+        let distanceScale = 1.0 / tan(state.image.fov / 2.0 |> toRad |> float)
+        let newDistance = state.image.distance + delta * 0.05 * distanceScale |> max -0.9 |> min (1.5 * distanceScale)
+        { state with image={ state.image with distance=newDistance } }, Cmd.none
+    | ZoomFov delta ->
+        let newFov = state.image.fov + delta * 2.5<deg> |> max 5.0<deg> |> min 90.0<deg>
+        let nearPlaneHeight = 2.0 * (state.image.distance + 1.0) * Math.Tan(state.image.fov / 2.0 |> toRad |> float)
+        let newDistance = (nearPlaneHeight / 2.0) / Math.Tan(newFov / 2.0 |> toRad |> float) - 1.0
+        { state with image={ state.image with distance=newDistance; fov=newFov } }, Cmd.none
+    | Roll (screenDelta , screenSize) ->
+        if state.image.useEquirectangular then
+            let fov = state.image.fov |> toRad |> single
+            let aspect = screenSize.X / screenSize.Y |> single
+            let distance = state.image.distance |> single
+
+            let forward = Vector3.UnitY
+            let upward = Vector3.UnitZ
+            let cameraPos = forward * -distance
+            let worldViewMatrix =
+                Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+            let viewProjectionMatrix =
+                Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
+            let projectionViewportMatrix =
+                Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X |> single, screenSize.Y |> single, 0.0f, 1.0f)
+            let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
+            let fromDir = forward - cameraPos
+            let toDir = Vector3.Transform(
+                Vector3((screenDelta.X + (screenSize.X / 2.0)) |> single, (screenDelta.Y + (screenSize.Y / 2.0)) |> single, 0.0f), 
+                viewportWorldMatrix)
+            let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
+            let roll = 
+                (angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg) + state.image.roll
+                |> clamp -90.0<deg> 90.0<deg>
+            { state with image={ state.image with roll=roll } }, Cmd.none
+        else
+            match state.image.source with
+            | None ->
+                state, Cmd.none
+            | Some { bitmap=bmp } ->
+                let forward = -Vector3.UnitZ
+                let upward = Vector3.UnitY
+                let aspect = screenSize.X / screenSize.Y
+                let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
+                let cameraPos = forward * single -state.image.distance
+                let scale = 1.0 / (1.0 + state.image.distance)
+                let scaleToFit =
+                    if imageAspect > aspect then
+                        Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
+                    else
+                        Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
+                let worldViewMatrix =
+                    Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
+                    scaleToFit *
+                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
+                let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
+                let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
+                let pan = Vector(
+                    state.image.pan.X + float delta.X |> clamp -1.0 1.0,
+                    state.image.pan.Y - float delta.Y |> clamp -1.0 1.0
+                )
+                { state with image={ state.image with pan=pan } }, Cmd.none
+    | Move (screenDelta , screenSize) ->
+        if state.image.useEquirectangular then
+            let fov = state.image.fov |> toRad |> single
+            let aspect = screenSize.X / screenSize.Y |> single
+            let distance = state.image.distance |> single
+
+            let forward = Vector3.UnitY
+            let upward = Vector3.UnitZ
+            let cameraPos = forward * -distance
+            let worldViewMatrix =
+                Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+            let viewProjectionMatrix =
+                Matrix4x4.CreatePerspectiveFieldOfView(fov, aspect, 1.0f+distance, 10.0f+distance)
+            let projectionViewportMatrix =
+                Matrix4x4.CreateViewport(0.0f, 0.0f, screenSize.X |> single, screenSize.Y |> single, 0.0f, 1.0f)
+            let viewportWorldMatrix = worldViewMatrix * viewProjectionMatrix * projectionViewportMatrix |> Matrix4x4.invert
+            let fromDir = forward - cameraPos
+            let toDir = Vector3.Transform(
+                Vector3((screenDelta.X + (screenSize.X / 2.0)) |> single, (screenDelta.Y + (screenSize.Y / 2.0)) |> single, 0.0f), 
+                viewportWorldMatrix)
+            let toDir1 = Vector3(toDir.X, toDir.Y, 0.0f) |> Vector3.Normalize
+            let toDir2 = Vector3(0.0f, toDir.Y, toDir.Z) |> Vector3.Normalize
+            let yawDelta = angleFromTo fromDir toDir1 Vector3.UnitZ |> toDeg
+            let pitchDelta = angleFromTo fromDir toDir2 Vector3.UnitX |> toDeg
+            let roll =
+                signf state.image.roll *
+                (abs state.image.roll - 0.7 * (abs pitchDelta + abs yawDelta) |> max 0.0<deg>)
+            let yaw = state.image.yaw + yawDelta
+            let yaw =
+                if yaw > 180.0<deg> then
+                    yaw - 360.0<deg>
+                else if yaw < -180.0<deg> then
+                    yaw + 360.0<deg>
+                else
+                    yaw
+            let pitch = clamp -90.0<deg> 90.0<deg> (state.image.pitch + pitchDelta)
+            let roll = clamp -90.0<deg> 90.0<deg> roll
+            { state with image={ state.image with yaw=yaw; pitch=pitch; roll=roll } }, Cmd.none
+        else
+            match state.image.source with
+            | None ->
+                state, Cmd.none
+            | Some { bitmap=bmp } ->
+                let forward = -Vector3.UnitZ
+                let upward = Vector3.UnitY
+                let aspect = screenSize.X / screenSize.Y
+                let imageAspect = (bmp.Info.Width |> float) / (bmp.Info.Height |> float)
+                let cameraPos = forward * single -state.image.distance
+                let scale = 1.0 / (1.0 + state.image.distance)
+                let scaleToFit =
+                    if imageAspect > aspect then
+                        Matrix4x4.CreateScale(1.0f, aspect / imageAspect |> single, 1.0f)
+                    else
+                        Matrix4x4.CreateScale(imageAspect / aspect |> single, 1.0f, 1.0f)
+                let worldViewMatrix =
+                    Matrix4x4.CreateScale(scale |> single, scale |> single, 1.0f) *
+                    scaleToFit *
+                    Matrix4x4.CreateLookTo(cameraPos, forward, upward)
+                let viewProjectionMatrix = Matrix4x4.CreateOrthographicOffCenter(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, 10.0f)
+                let projectionWorldMatrix = worldViewMatrix * viewProjectionMatrix |> Matrix4x4.invert
+                let delta = Vector3.Transform(Vector3(single (screenDelta.X * 2.0 / screenSize.X), single (screenDelta.Y * 2.0 / screenSize.Y), 0.0f), projectionWorldMatrix)
+                let pan = Vector(
+                    state.image.pan.X + float delta.X |> clamp -1.0 1.0,
+                    state.image.pan.Y - float delta.Y |> clamp -1.0 1.0
+                )
+                { state with image={ state.image with pan=pan } }, Cmd.none
+    | SetViewEquirectangular value ->
+        { state with image={ state.image with useEquirectangular=value } }, Cmd.none
+    | ToggleFullScreen ->
+        if state.fullScreen then
+            host.WindowState <- WindowState.Normal
+        else
+            host.WindowState <- WindowState.FullScreen
+        { state with fullScreen = not state.fullScreen }, Cmd.none
+    | ExitFullScreen ->
+        if state.fullScreen then
+            host.WindowState <- WindowState.Normal
+        { state with fullScreen = false }, Cmd.none
+    | Exiting ->
+        let collection = state.db.GetCollection<PerImageSettings>()
+
+        state.db.BeginTrans() |> ignore
+        state.image.source
+        |> Option.iter (fun imageSource ->
+            imageSource.bitmap.Dispose()
+            let serializable = PerImageSettings(
+                SourcePath = imageSource.file.Path.ToString(),
+                Fov = state.image.fov,
+                Distance = state.image.distance,
+                Yaw = state.image.yaw,
+                Pitch = state.image.pitch,
+                Roll = state.image.roll,
+                PanX = state.image.pan.X,
+                PanY = state.image.pan.Y,
+                UseEquirectangular = state.image.useEquirectangular
+            )
+            collection.Upsert(serializable) |> ignore
+        )
+
+        collection.Find(LiteDB.Query.All("Updated", LiteDB.Query.Descending), settingEntriesLimit, 1)
+        |> Seq.tryHead
+        |> Option.iter (fun oldest -> collection.DeleteMany(Query.LTE("Updated", oldest.Updated)) |> ignore)
+        state.db.Commit() |> ignore
+
+        state.db.Dispose()
+
+        state, Cmd.none
+
+    | Exit ->
+        host.Close()
+        state, Cmd.none
+
+let view (host: HostWindow) (state: State) (dispatch) =
+    Grid.create [
+        Grid.classes ["root"]
+        Grid.allowDrop true
+        Grid.onDrop (fun args ->
+            match args.DataTransfer.TryGetFile() with
+            | :? IStorageFile as file ->
+                OpenFile file |> dispatch
+            | :? IStorageFolder as folder ->
+                OpenFolder folder |> dispatch
+            | _ -> ()
+        )
+        Grid.columnDefinitions [
+            ColumnDefinition(1.0, GridUnitType.Star, MinWidth=40.0, MaxWidth=80.0)
+            ColumnDefinition(8.0, GridUnitType.Star)
+            ColumnDefinition(1.0, GridUnitType.Star, MinWidth=40.0, MaxWidth=80.0)
+        ]
+        Grid.rowDefinitions "Auto, *"
+        Grid.children [
+            ImageViewControl.create [
+                ImageViewControl.init (fun ivc ->
+                    ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
+                    ivc.GestureRecognizers.Add(ExclusivePinchGestureRecognizer())
+                )
+                ImageViewControl.focusable true
+                ImageViewControl.row 0
+                ImageViewControl.rowSpan 2
+                ImageViewControl.column 0
+                ImageViewControl.columnSpan 3
+                ImageViewControl.horizontalAlignment HorizontalAlignment.Stretch
+                ImageViewControl.verticalAlignment VerticalAlignment.Stretch
+                ImageViewControl.image (state.image.source |> Option.map _.bitmap)
+                ImageViewControl.fov state.image.fov
+                ImageViewControl.distance state.image.distance
+                ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) (state.image.roll |> toRad))
+                ImageViewControl.pan state.image.pan
+                ImageViewControl.viewEquirectangular state.image.useEquirectangular
+                ImageViewControl.onPointerWheelChanged 
+                    (fun args ->
+                        if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
+                            ZoomFov -args.Delta.Y
+                        else
+                            Zoom -args.Delta.Y
+                        |> dispatch
+                    )
+                ImageViewControl.onDragMove (fun args ->
+                    match args.Source with
+                    | :? ImageViewControl as ivc ->
+                        args.Handled <- true
+                        if args.KeyModifiers.HasFlag KeyModifiers.Shift then
+                            (
+                                Vector(args.Delta.X, args.Delta.Y),
+                                Vector(ivc.Bounds.Width, ivc.Bounds.Height)
+                            )
+                            |> Roll
                             |> dispatch
-                        )
-                    ImageViewControl.onDragMove (fun args ->
-                        match args.Source with
-                        | :? ImageViewControl as ivc ->
-                            args.Handled <- true
-                            if args.KeyModifiers.HasFlag KeyModifiers.Shift then
+                        else
+                            (
+                                Vector(args.Delta.X, args.Delta.Y),
+                                Vector(ivc.Bounds.Width, ivc.Bounds.Height)
+                            )
+                            |> Move
+                            |> dispatch
+                    |_ -> ()
+                )
+                ImageViewControl.onPinch (fun args ->
+                    args.Handled <- true
+                    Pinch (args.Scale, args.AngleDelta * 1.0<deg>) |> dispatch
+                )
+                ImageViewControl.onPinchEnded (fun args ->
+                    args.Handled <- true
+                    PinchEnd |> dispatch
+                )
+                ImageViewControl.onKeyDown (fun args ->
+                    match args.Source with
+                    | :? ImageViewControl as ivc ->
+                        if args.KeyModifiers = KeyModifiers.None || args.KeyModifiers = KeyModifiers.Shift then
+                            let k =
+                                if args.KeyModifiers = KeyModifiers.Shift then
+                                    20.0
+                                else
+                                    10.0
+                            let move v =
                                 (
-                                    Vector(args.Delta.X, args.Delta.Y),
-                                    Vector(ivc.Bounds.Width, ivc.Bounds.Height)
-                                )
-                                |> Roll
-                                |> dispatch
-                            else
-                                (
-                                    Vector(args.Delta.X, args.Delta.Y),
+                                    v,
                                     Vector(ivc.Bounds.Width, ivc.Bounds.Height)
                                 )
                                 |> Move
                                 |> dispatch
-                        |_ -> ()
-                    )
-                    ImageViewControl.onPinch (fun args ->
-                        args.Handled <- true
-                        Pinch (args.Scale, args.AngleDelta * 1.0<deg>) |> dispatch
-                    )
-                    ImageViewControl.onPinchEnded (fun args ->
-                        args.Handled <- true
-                        PinchEnd |> dispatch
-                    )
-                    ImageViewControl.onKeyDown (fun args ->
-                        match args.Source with
-                        | :? ImageViewControl as ivc ->
-                            if args.KeyModifiers = KeyModifiers.None || args.KeyModifiers = KeyModifiers.Shift then
-                                let k =
-                                    if args.KeyModifiers = KeyModifiers.Shift then
-                                        20.0
-                                    else
-                                        10.0
-                                let move v =
-                                    (
-                                        v,
-                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height)
-                                    )
-                                    |> Move
-                                    |> dispatch
-                                let roll v =
-                                    (
-                                        v,
-                                        Vector(ivc.Bounds.Width, ivc.Bounds.Height)
-                                    )
-                                    |> Roll
-                                    |> dispatch
-                                match args.Key with
-                                | Key.Left ->
-                                    args.Handled <- true
-                                    move (Vector(k, 0.0))
-                                | Key.Right ->
-                                    args.Handled <- true
-                                    move (Vector(-k, 0.0))
-                                | Key.Up ->
-                                    args.Handled <- true
-                                    move (Vector(0.0, k))
-                                | Key.Down ->
-                                    args.Handled <- true
-                                    move (Vector(0.0, -k))
-                                | Key.Q ->
-                                    args.Handled <- true
-                                    roll (Vector(0.0, k))
-                                | Key.E ->
-                                    args.Handled <- true
-                                    roll (Vector(0.0, -k))
-                                | _ -> ()
-                        | _ -> ()
-                    )
-                ]
-                Button.create [
-                    Button.classes ["nav-button"]
-                    Button.row 1
-                    Button.column 0
-                    Button.hotKey (KeyGesture(Key.Left, KeyModifiers.Alt))
-                    Button.onClick (fun _ -> dispatch PreviousImage)
-                    Button.content "◀"
-                    Button.verticalContentAlignment VerticalAlignment.Center
-                    Button.horizontalAlignment HorizontalAlignment.Stretch
-                    Button.verticalAlignment VerticalAlignment.Stretch
-                ]
-                Button.create [
-                    Button.classes ["nav-button"]
-                    Button.row 1
-                    Button.column 2
-                    Button.hotKey (KeyGesture(Key.Right, KeyModifiers.Alt))
-                    Button.onClick (fun _ -> dispatch NextImage)
-                    Button.content "▶"
-                    Button.verticalContentAlignment VerticalAlignment.Center
-                    Button.horizontalAlignment HorizontalAlignment.Stretch
-                    Button.verticalAlignment VerticalAlignment.Stretch
-                ]
-                Menu.create [
-                    Menu.row 0
-                    Menu.column 0
-                    Menu.columnSpan 3
-                    Menu.horizontalAlignment HorizontalAlignment.Stretch
-                    Menu.verticalAlignment VerticalAlignment.Top
-                    Menu.viewItems [
-                        MenuItem.create [
-                            MenuItem.header "File"
-                            MenuItem.viewItems [
-                                MenuItem.create [
-                                    MenuItem.header "Open"
-                                    MenuItem.hotKey (KeyGesture(Key.O, KeyModifiers.Control))
-                                    MenuItem.inputGesture (KeyGesture(Key.O, KeyModifiers.Control))
-                                    MenuItem.onClick (fun _ -> dispatch SelectImage)
-                                ]
-                                Separator.create []
-                                MenuItem.create [
-                                    MenuItem.header "Exit"
-                                    MenuItem.onClick (fun _ -> dispatch Exit)
-                                ]
+                            let roll v =
+                                (
+                                    v,
+                                    Vector(ivc.Bounds.Width, ivc.Bounds.Height)
+                                )
+                                |> Roll
+                                |> dispatch
+                            match args.Key with
+                            | Key.Left ->
+                                args.Handled <- true
+                                move (Vector(k, 0.0))
+                            | Key.Right ->
+                                args.Handled <- true
+                                move (Vector(-k, 0.0))
+                            | Key.Up ->
+                                args.Handled <- true
+                                move (Vector(0.0, k))
+                            | Key.Down ->
+                                args.Handled <- true
+                                move (Vector(0.0, -k))
+                            | Key.Q ->
+                                args.Handled <- true
+                                roll (Vector(0.0, k))
+                            | Key.E ->
+                                args.Handled <- true
+                                roll (Vector(0.0, -k))
+                            | _ -> ()
+                    | _ -> ()
+                )
+            ]
+            Button.create [
+                Button.classes ["nav-button"]
+                Button.row 1
+                Button.column 0
+                Button.hotKey (KeyGesture(Key.Left, KeyModifiers.Alt))
+                Button.onClick (fun _ -> dispatch PreviousImage)
+                Button.content "◀"
+                Button.verticalContentAlignment VerticalAlignment.Center
+                Button.horizontalAlignment HorizontalAlignment.Stretch
+                Button.verticalAlignment VerticalAlignment.Stretch
+            ]
+            Button.create [
+                Button.classes ["nav-button"]
+                Button.row 1
+                Button.column 2
+                Button.hotKey (KeyGesture(Key.Right, KeyModifiers.Alt))
+                Button.onClick (fun _ -> dispatch NextImage)
+                Button.content "▶"
+                Button.verticalContentAlignment VerticalAlignment.Center
+                Button.horizontalAlignment HorizontalAlignment.Stretch
+                Button.verticalAlignment VerticalAlignment.Stretch
+            ]
+            Menu.create [
+                Menu.row 0
+                Menu.column 0
+                Menu.columnSpan 3
+                Menu.horizontalAlignment HorizontalAlignment.Stretch
+                Menu.verticalAlignment VerticalAlignment.Top
+                Menu.viewItems [
+                    MenuItem.create [
+                        MenuItem.header "File"
+                        MenuItem.viewItems [
+                            MenuItem.create [
+                                MenuItem.header "Open"
+                                MenuItem.hotKey (KeyGesture(Key.O, KeyModifiers.Control))
+                                MenuItem.inputGesture (KeyGesture(Key.O, KeyModifiers.Control))
+                                MenuItem.onClick (fun _ -> dispatch SelectImage)
+                            ]
+                            Separator.create []
+                            MenuItem.create [
+                                MenuItem.header "Exit"
+                                MenuItem.onClick (fun _ -> dispatch Exit)
                             ]
                         ]
-                        MenuItem.create [
-                            MenuItem.header "View"
-                            MenuItem.viewItems [
-                                MenuItem.create [
-                                    MenuItem.header "Reset View"
-                                    MenuItem.hotKey (KeyGesture(Key.R))
-                                    MenuItem.inputGesture (KeyGesture(Key.R))
-                                    MenuItem.onClick (fun _ -> ResetView |> dispatch )
-                                ]
-                                Separator.create []
-                                MenuItem.create [
-                                    MenuItem.header "Flat (2D)"
-                                    MenuItem.toggleType MenuItemToggleType.Radio
-                                    MenuItem.isChecked (not state.image.useEquirectangular)
-                                    MenuItem.onClick (fun _ -> SetViewEquirectangular false |> dispatch)
-                                ]
-                                MenuItem.create [
-                                    MenuItem.header "Panorama (360° Spherical)"
-                                    MenuItem.toggleType MenuItemToggleType.Radio
-                                    MenuItem.isChecked state.image.useEquirectangular
-                                    MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
-                                ]
-                                Separator.create []
-                                MenuItem.create [
-                                    MenuItem.header "Zoom in"
-                                    MenuItem.hotKey (KeyGesture(Key.OemPlus))
-                                    MenuItem.inputGesture (KeyGesture(Key.OemPlus))
-                                    MenuItem.onClick (fun _ -> Zoom -1.0 |> dispatch)
-                                ]
-                                MenuItem.create [
-                                    MenuItem.header "Zoom out"
-                                    MenuItem.hotKey (KeyGesture(Key.OemMinus))
-                                    MenuItem.inputGesture (KeyGesture(Key.OemMinus))
-                                    MenuItem.onClick (fun _ -> Zoom 1.0 |> dispatch)
-                                ]
-                                MenuItem.create [
-                                    MenuItem.header "Warp"
-                                    MenuItem.hotKey (KeyGesture(Key.OemPlus, KeyModifiers.Shift))
-                                    MenuItem.inputGesture (KeyGesture(Key.OemPlus, KeyModifiers.Shift))
-                                    MenuItem.onClick (fun _ -> ZoomFov -1.0 |> dispatch)
-                                ]
-                                MenuItem.create [
-                                    MenuItem.header "Dewarp"
-                                    MenuItem.hotKey (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
-                                    MenuItem.inputGesture (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
-                                    MenuItem.onClick (fun _ -> ZoomFov 1.0 |> dispatch)
-                                ]
-                                Separator.create []
-                                MenuItem.create [
-                                    MenuItem.header "Fullscreen"
-                                    MenuItem.hotKey (KeyGesture(Key.F11))
-                                    MenuItem.inputGesture (KeyGesture(Key.F11))
-                                    MenuItem.toggleType MenuItemToggleType.CheckBox
-                                    MenuItem.isChecked state.fullScreen
-                                    MenuItem.onClick (fun _ -> ToggleFullScreen |> dispatch )
-                                ]
+                    ]
+                    MenuItem.create [
+                        MenuItem.header "View"
+                        MenuItem.viewItems [
+                            MenuItem.create [
+                                MenuItem.header "Reset View"
+                                MenuItem.hotKey (KeyGesture(Key.R))
+                                MenuItem.inputGesture (KeyGesture(Key.R))
+                                MenuItem.onClick (fun _ -> ResetView |> dispatch )
+                            ]
+                            Separator.create []
+                            MenuItem.create [
+                                MenuItem.header "Flat (2D)"
+                                MenuItem.toggleType MenuItemToggleType.Radio
+                                MenuItem.isChecked (not state.image.useEquirectangular)
+                                MenuItem.onClick (fun _ -> SetViewEquirectangular false |> dispatch)
+                            ]
+                            MenuItem.create [
+                                MenuItem.header "Panorama (360° Spherical)"
+                                MenuItem.toggleType MenuItemToggleType.Radio
+                                MenuItem.isChecked state.image.useEquirectangular
+                                MenuItem.onClick (fun _ -> SetViewEquirectangular true |> dispatch)
+                            ]
+                            Separator.create []
+                            MenuItem.create [
+                                MenuItem.header "Zoom in"
+                                MenuItem.hotKey (KeyGesture(Key.OemPlus))
+                                MenuItem.inputGesture (KeyGesture(Key.OemPlus))
+                                MenuItem.onClick (fun _ -> Zoom -1.0 |> dispatch)
+                            ]
+                            MenuItem.create [
+                                MenuItem.header "Zoom out"
+                                MenuItem.hotKey (KeyGesture(Key.OemMinus))
+                                MenuItem.inputGesture (KeyGesture(Key.OemMinus))
+                                MenuItem.onClick (fun _ -> Zoom 1.0 |> dispatch)
+                            ]
+                            MenuItem.create [
+                                MenuItem.header "Warp"
+                                MenuItem.hotKey (KeyGesture(Key.OemPlus, KeyModifiers.Shift))
+                                MenuItem.inputGesture (KeyGesture(Key.OemPlus, KeyModifiers.Shift))
+                                MenuItem.onClick (fun _ -> ZoomFov -1.0 |> dispatch)
+                            ]
+                            MenuItem.create [
+                                MenuItem.header "Dewarp"
+                                MenuItem.hotKey (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
+                                MenuItem.inputGesture (KeyGesture(Key.OemMinus, KeyModifiers.Shift))
+                                MenuItem.onClick (fun _ -> ZoomFov 1.0 |> dispatch)
+                            ]
+                            Separator.create []
+                            MenuItem.create [
+                                MenuItem.header "Fullscreen"
+                                MenuItem.hotKey (KeyGesture(Key.F11))
+                                MenuItem.inputGesture (KeyGesture(Key.F11))
+                                MenuItem.toggleType MenuItemToggleType.CheckBox
+                                MenuItem.isChecked state.fullScreen
+                                MenuItem.onClick (fun _ -> ToggleFullScreen |> dispatch )
                             ]
                         ]
                     ]
                 ]
             ]
         ]
+    ]
 
 type MainWindow (args: string array) as this =
     inherit HostWindow()
@@ -1842,19 +822,19 @@ type MainWindow (args: string array) as this =
                 this.KeyDown.Subscribe(fun e ->
                     match e.Key with
                     | Key.Escape ->
-                        dispatch Viewer.Msg.ExitFullScreen
+                        dispatch Msg.ExitFullScreen
                     | _ -> ()
                 )
             let onClosing (dispatch) =
                 this.Closing.Subscribe(fun e ->
-                    dispatch Viewer.Msg.Exiting
+                    dispatch Msg.Exiting
                 )
             [
                 [nameof onKeyDown], onKeyDown
                 [nameof onClosing], onClosing
             ]
 
-        Elmish.Program.mkProgram (Viewer.init this) (Viewer.update this) (Viewer.view this)
+        Elmish.Program.mkProgram (init this) (update this) (view this)
         |> Program.withHost this
         |> Program.withSubscription subscriptions
 #if DEBUG
@@ -1900,7 +880,7 @@ type App() =
 
     override this.Initialize() =
         this.Styles.Add(Avalonia.Themes.Simple.SimpleTheme())
-        this.Styles.Add(ZenkeiViewer.ZenkeiViewerStyles())
+        this.Styles.Add(ZenkeiViewerXaml.ZenkeiViewerStyles())
         //this.RequestedThemeVariant <- Avalonia.Styling.ThemeVariant.Dark
 
     override this.OnFrameworkInitializationCompleted() =
