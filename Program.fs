@@ -603,7 +603,7 @@ let view (host: HostWindow) (state: State) (dispatch) =
         Grid.rowDefinitions "Auto, *"
         Grid.children [
             ImageViewControl.create [
-                ImageViewControl.init (fun ivc ->
+                ImageViewControl.init (fun (ivc: ImageViewControl) ->
                     ivc.GestureRecognizers.Add(DragMoveGestureRecognizer())
                     ivc.GestureRecognizers.Add(ExclusivePinchGestureRecognizer())
                 )
@@ -614,12 +614,16 @@ let view (host: HostWindow) (state: State) (dispatch) =
                 ImageViewControl.columnSpan 3
                 ImageViewControl.horizontalAlignment HorizontalAlignment.Stretch
                 ImageViewControl.verticalAlignment VerticalAlignment.Stretch
-                ImageViewControl.image (state.image.source |> Option.map _.bitmap)
-                ImageViewControl.fov state.image.fov
-                ImageViewControl.distance state.image.distance
-                ImageViewControl.direction (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) (state.image.roll |> toRad))
-                ImageViewControl.pan state.image.pan
-                ImageViewControl.viewEquirectangular state.image.useEquirectangular
+                let renderMode =
+                    match state.image.source, state.image.useEquirectangular with
+                    | (Some { bitmap=bmp }, true) ->
+                        let direction = (Quaternion.fromYawPitchRoll (state.image.yaw |> toRad) (state.image.pitch |> toRad) (state.image.roll |> toRad))
+                        RenderMode.Equirectangular(bmp, state.image.fov, state.image.distance, direction)
+                    | (Some { bitmap=bmp }, false) ->
+                        RenderMode.Planar(bmp, state.image.pan, state.image.distance, state.image.roll)
+                    | (None, _) ->
+                        RenderMode.Empty
+                ImageViewControl.renderMode renderMode
                 ImageViewControl.onPointerWheelChanged 
                     (fun args ->
                         if args.KeyModifiers.HasFlag(KeyModifiers.Shift) then
